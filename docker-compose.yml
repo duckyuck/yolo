@@ -1,0 +1,38 @@
+services:
+  claude:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HOST_UID: ${HOST_UID:-501}
+        HOST_GID: ${HOST_GID:-20}
+        CLAUDE_VERSION: ${CLAUDE_VERSION:-}
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GIT_TERMINAL_PROMPT: "0"
+      COLORTERM: truecolor
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      TZ: ${TZ:-}
+      HOST_HOME: ${HOST_HOME}
+      WORKDIR: ${WORKDIR}
+      SESSION_NAME: ${SESSION_NAME}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-4-6}
+      CLAUDE_CONTINUE: ${CLAUDE_CONTINUE:-}
+      GH_TOKEN: ${GH_TOKEN:-}
+    volumes:
+      # Git config (read-only)
+      - ${HOME}/.gitconfig:/home/claude/.gitconfig:ro
+
+      # SSH keys (staged read-only, entrypoint creates filtered copy)
+      - ${HOME}/.ssh:/mnt/host-ssh:ro
+
+      # Claude config (read-only mount, copied into container at startup)
+      - ${HOME}/.claude:/mnt/host-claude:ro
+      - ${HOME}/.claude.json:/mnt/host-claude.json:ro
+
+      # OAuth credentials (read-write so container sees host token refreshes and vice versa)
+      - ${HOME}/.claude/.credentials.json:/home/claude/.claude/.credentials.json

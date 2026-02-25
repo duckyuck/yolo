@@ -1,0 +1,1119 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: bash 4+ required (found ${BASH_VERSION}). Install with: brew install bash" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")")" && pwd)"
+
+YOLO_VERSION="0.1.0"
+YOLO_REPO="sourcemagnet/yolo"
+
+YOLO_HOME="${YOLO_HOME:-$HOME/.yolo}"
+
+# Resolve support file directory: installed layout > dev mode (co-located)
+if [ -n "${YOLO_LIB:-}" ]; then
+    :  # explicit override
+elif [ -f "$YOLO_HOME/lib/docker-compose.yml" ]; then
+    YOLO_LIB="$YOLO_HOME/lib"
+else
+    YOLO_LIB="$SCRIPT_DIR"
+fi
+
+# Parse global flags
+VERBOSE=false
+for arg in "$@"; do
+    if [ "$arg" = "--verbose" ] || [ "$arg" = "-v" ]; then
+        VERBOSE=true
+        break
+    fi
+done
+
+if ! docker info >/dev/null 2>&1; then
+    echo "Error: Docker daemon is not running. Start Docker Desktop and try again." >&2
+    exit 1
+fi
+
+# ─── UI Helpers ────────────────────────────────────────────────────────────────
+
+if [ -t 1 ]; then
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    RESET='\033[0m'
+    CYAN='\033[36m'
+    GREEN='\033[32m'
+    YELLOW='\033[33m'
+    RED='\033[31m'
+    BLUE='\033[34m'
+    MAGENTA='\033[35m'
+else
+    BOLD=''
+    DIM=''
+    RESET=''
+    CYAN=''
+    GREEN=''
+    YELLOW=''
+    RED=''
+    BLUE=''
+    MAGENTA=''
+fi
+
+SPINNER_FRAMES=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+
+start_spinner() {
+    local message="$1"
+    local pid=$2
+    local i=0
+    local loops=0
+
+    tput civis 2>/dev/null || true
+
+    while kill -0 $pid 2>/dev/null; do
+        local elapsed=$((loops / 13))
+        local time_str=""
+        if [ $elapsed -gt 0 ]; then
+            time_str=" ${DIM}(${elapsed}s)${RESET}"
+        fi
+        printf "\r${CYAN}${SPINNER_FRAMES[$i]}${RESET} ${DIM}${message}${RESET}${time_str}"
+        i=$(( (i + 1) % ${#SPINNER_FRAMES[@]} ))
+        loops=$((loops + 1))
+        sleep 0.08
+    done
+
+    printf "\r\033[K"
+    tput cnorm 2>/dev/null || true
+}
+
+spinner() {
+    local message="$1"
+    shift
+
+    if [ -t 1 ]; then
+        "$@" &
+        local pid=$!
+        start_spinner "$message" $pid
+        wait $pid
+        return $?
+    else
+        echo "$message"
+        "$@"
+        return $?
+    fi
+}
+
+status_msg() {
+    local icon="$1"
+    local message="$2"
+    echo -e "${icon} ${message}"
+}
+
+info()    { status_msg "${BLUE}ℹ${RESET}" "$1"; }
+success() { status_msg "${GREEN}✓${RESET}" "$1"; }
+warning() { status_msg "${YELLOW}⚠${RESET}" "$1"; }
+error()   { status_msg "${RED}✗${RESET}" "$1"; }
+step()    { echo -e "\n${BOLD}${MAGENTA}▸${RESET} ${BOLD}$1${RESET}"; }
+
+# ─── Path Transforms ──────────────────────────────────────────────────────────
+
+HOST_HOME="$HOME"
+CONTAINER_HOME="/home/claude"
+
+transform_paths_for_container() {
+    local input_file="$1"
+    local output_file="$2"
+    sed "s|${HOST_HOME}|${CONTAINER_HOME}|g" "$input_file" > "$output_file"
+}
+
+# ─── Credential Management ────────────────────────────────────────────────────
+
+has_oauth_credentials() {
+    # Check credentials file has an OAuth access token (file is mounted into the
+    # container, which lets Claude Code refresh the token when it expires)
+    if [ -f "$HOME/.claude/.credentials.json" ]; then
+        local token
+        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
+        [ -n "$token" ] && return 0
+    fi
+
+    return 1
+}
+
+require_auth() {
+    if [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        return
+    fi
+
+    if has_oauth_credentials; then
+        info "Using OAuth credentials from host"
+        return
+    fi
+
+    error "No auth configured. Set one of:"
+    echo "  export ANTHROPIC_API_KEY=sk-..." >&2
+    echo "  export CLAUDE_CODE_OAUTH_TOKEN=..." >&2
+    echo "" >&2
+    echo "  For Max/Pro subscribers with Claude Code on the host:" >&2
+    echo "    claude auth login    (creates ~/.claude/.credentials.json)" >&2
+    exit 1
+}
+
+# ─── Git Repo Detection ───────────────────────────────────────────────────────
+
+detect_git_repos() {
+    local project_dir="$1"
+
+    # Mode 1: project dir itself is a git repo
+    if [ -d "$project_dir/.git" ] || [ -f "$project_dir/.git" ]; then
+        echo "$project_dir"
+        return
+    fi
+
+    # Mode 2: scan immediate children for git repos
+    for child in "$project_dir"/*/; do
+        [ -d "$child" ] || continue
+        if [ -d "$child/.git" ] || [ -f "$child/.git" ]; then
+            echo "${child%/}"
+        fi
+    done
+}
+
+ensure_git_repos() {
+    local project_dir="$1"
+    readarray -t REPOS < <(detect_git_repos "$project_dir")
+
+    if [ ${#REPOS[@]} -eq 0 ]; then
+        warning "No git repos found in $(basename "$project_dir")"
+        echo ""
+        echo -ne "Initialize ${BOLD}$project_dir${RESET} as a git repo? [Y/n]: "
+        read -r choice
+        case "${choice:-y}" in
+            y|Y|"")
+                git -C "$project_dir" init
+                git -C "$project_dir" add -A
+                git -C "$project_dir" commit -m "Initial commit" --allow-empty
+                success "Initialized git repo"
+                readarray -t REPOS < <(detect_git_repos "$project_dir")
+                ;;
+            *)
+                error "Cannot proceed without a git repo."
+                exit 1
+                ;;
+        esac
+    fi
+}
+
+# ─── Worktree Management ──────────────────────────────────────────────────────
+
+resolve_git_common_dir() {
+    # Resolve the parent .git directory for a repo (handles repos that are themselves worktrees)
+    local repo_dir="$1"
+    local git_dir
+
+    if [ -f "$repo_dir/.git" ]; then
+        # This repo is itself a worktree — .git is a file pointing to the real .git dir
+        git_dir=$(sed 's/^gitdir: //' "$repo_dir/.git")
+        # Make absolute if relative
+        if [[ "$git_dir" != /* ]]; then
+            git_dir="$(cd "$repo_dir" && cd "$(dirname "$git_dir")" && pwd)/$(basename "$git_dir")"
+        fi
+        # Go up from .git/worktrees/<name> to .git
+        local common_dir
+        common_dir=$(git -C "$repo_dir" rev-parse --git-common-dir 2>/dev/null) || true
+        if [ -n "$common_dir" ]; then
+            if [[ "$common_dir" != /* ]]; then
+                common_dir="$(cd "$repo_dir" && cd "$common_dir" && pwd)"
+            fi
+            echo "$common_dir"
+            return
+        fi
+        echo "$git_dir"
+    elif [ -d "$repo_dir/.git" ]; then
+        echo "$repo_dir/.git"
+    fi
+}
+
+resolve_git_mounts() {
+    # Returns volume mount flags for worktrees and their parent .git directories.
+    # Worktrees already exist (created by host-side create_worktrees before container starts).
+    local project_dir="$1"
+    local safe_name="$2"
+    shift 2
+    local repos=("$@")
+
+    local session_base="$YOLO_DIR/$safe_name"
+    local mounts=()
+
+    # Mount the session base directory (contains worktrees)
+    mounts+=("$session_base:$session_base")
+
+    for repo_path in "${repos[@]}"; do
+        # Mount parent .git directory (worktree .git files reference it)
+        local git_dir
+        git_dir=$(resolve_git_common_dir "$repo_path")
+        if [ -n "$git_dir" ] && [ -d "$git_dir" ]; then
+            mounts+=("$git_dir:$git_dir")
+        fi
+    done
+
+    # Deduplicate mounts
+    printf '%s\n' "${mounts[@]}" | sort -u
+}
+
+# Print worktree status for all worktrees in a session directory.
+# Looks up source repos from sessions.json. Optional indent prefix for nested display.
+# Usage: print_session_worktrees <worktree_base_dir> <safe_name> [indent]
+print_session_worktrees() {
+    local wt_base="$1"
+    local safe_name="$2"
+    local indent="${3:-}"
+    local sessions_json
+    sessions_json="$(dirname "$wt_base")/sessions.json"
+
+    [ -d "$wt_base" ] || return 0
+
+    for wt in "$wt_base"/*/; do
+        [ -d "$wt" ] || continue
+        local wt_name
+        wt_name=$(basename "$wt")
+        local wt_source=""
+        if [ -f "$sessions_json" ]; then
+            wt_source=$(jq -r --arg s "$safe_name" --arg r "$wt_name" '.[$s][$r].source // empty' "$sessions_json" 2>/dev/null)
+        fi
+        if [ -n "$wt_source" ] && [ -d "$wt_source" ]; then
+            echo -n "$indent"
+            print_worktree_status "$wt" "$wt_source" || true
+        else
+            echo -e "${indent}  ${CYAN}$wt_name${RESET}: ${DIM}source repo not found${RESET}"
+        fi
+    done
+}
+
+# Record worktree-to-source-repo mapping in sessions.json.
+# Usage: update_sessions_json <yolo_dir> <safe_name> <repo_path>...
+update_sessions_json() {
+    local yolo_dir="$1"
+    local safe_name="$2"
+    shift 2
+    local repos=("$@")
+
+    local sessions_json="$yolo_dir/sessions.json"
+    command -v jq >/dev/null 2>&1 || return 0
+
+    local json="{}"
+    [ -f "$sessions_json" ] && json=$(cat "$sessions_json")
+    for repo_path in "${repos[@]}"; do
+        local repo_name
+        repo_name=$(basename "$repo_path")
+        json=$(echo "$json" | jq --arg s "$safe_name" --arg r "$repo_name" --arg src "$repo_path" \
+            '.[$s][$r].source = $src')
+    done
+    echo "$json" > "$sessions_json"
+}
+
+# Print status line for a single worktree: commits ahead + dirty state.
+# Returns 0 if clean and not ahead, 1 if dirty or ahead (for auto-clean decisions).
+# Usage: print_worktree_status <worktree_path> <source_repo_path>
+print_worktree_status() {
+    local wt_path="$1"
+    local repo_path="$2"
+    local repo_name
+    repo_name=$(basename "$wt_path")
+
+    local has_changes=0
+    local ahead=0
+    local current_branch
+    current_branch=$(git -C "$repo_path" rev-parse --abbrev-ref HEAD 2>/dev/null) || current_branch="main"
+    local base_commit
+    base_commit=$(git -C "$repo_path" rev-parse "$current_branch" 2>/dev/null) || true
+
+    if [ -n "${base_commit:-}" ]; then
+        ahead=$(git -C "$wt_path" rev-list --count "$base_commit..HEAD" 2>/dev/null) || ahead=0
+    fi
+
+    local dirty=""
+    if [ -n "$(git -C "$wt_path" status --porcelain 2>/dev/null)" ]; then
+        dirty=" ${YELLOW}(uncommitted changes)${RESET}"
+        has_changes=1
+    fi
+
+    if [ "$ahead" -gt 0 ]; then
+        # Check if content is already on the base branch (e.g. cherry-picked or rebased)
+        if [ -n "${base_commit:-}" ] && [ -z "$(git -C "$wt_path" diff "$base_commit" HEAD 2>/dev/null)" ]; then
+            echo -e "  ${CYAN}$repo_name${RESET}: ${DIM}already merged into ${current_branch}${RESET}${dirty}"
+        else
+            echo -e "  ${CYAN}$repo_name${RESET}: ${GREEN}$ahead commit(s) ahead of ${current_branch}${RESET}${dirty}"
+            has_changes=1
+        fi
+    else
+        echo -e "  ${CYAN}$repo_name${RESET}: ${DIM}no new commits${RESET}${dirty}"
+    fi
+
+    return $has_changes
+}
+
+cleanup_worktrees() {
+    local session_name="$1"
+    local safe_name="$2"
+    shift 2
+    local repos=("$@")
+
+    local worktree_base="$YOLO_DIR/$safe_name"
+
+    if [ ! -d "$worktree_base" ]; then
+        info "No worktrees to clean up"
+        return
+    fi
+
+    local any_changes=false
+
+    echo ""
+    echo -e "${BOLD}Worktree status:${RESET}"
+
+    for repo_path in "${repos[@]}"; do
+        local wt_path="$worktree_base/$(basename "$repo_path")"
+        [ -d "$wt_path" ] || continue
+        if ! print_worktree_status "$wt_path" "$repo_path"; then
+            any_changes=true
+        fi
+    done
+
+    # Auto-clean if all worktrees are clean and not ahead
+    if [ "$any_changes" = "false" ]; then
+        echo ""
+        remove_worktrees "$session_name" "$safe_name" false "${repos[@]}"
+        return
+    fi
+
+    echo ""
+    echo -ne "Remove worktrees for '$session_name'? [y/${BOLD}N${RESET}/b] (b=also delete branches): "
+    read -r choice
+    case "${choice:-n}" in
+        y|Y)
+            remove_worktrees "$session_name" "$safe_name" false "${repos[@]}"
+            ;;
+        b|B)
+            remove_worktrees "$session_name" "$safe_name" true "${repos[@]}"
+            ;;
+        *)
+            info "Worktrees kept at $worktree_base"
+            return
+            ;;
+    esac
+}
+
+remove_worktrees() {
+    local session_name="$1"
+    local safe_name="$2"
+    local delete_branches="$3"
+    shift 3
+    local repos=("$@")
+
+    local worktree_base="$YOLO_DIR/$safe_name"
+
+    for repo_path in "${repos[@]}"; do
+        local repo_name
+        repo_name=$(basename "$repo_path")
+        local wt_path="$worktree_base/$repo_name"
+
+        if [ -d "$wt_path" ]; then
+            git -C "$repo_path" worktree remove --force "$wt_path" 2>/dev/null \
+                || { chmod -R -N "$wt_path" 2>/dev/null; rm -rf "$wt_path"; }
+        fi
+
+        if [ "$delete_branches" = "true" ]; then
+            git -C "$repo_path" branch -D "$session_name" 2>/dev/null || true
+        fi
+    done
+
+    chmod -R -N "$worktree_base" 2>/dev/null
+    rm -rf "$worktree_base"
+
+    # Remove session entry from sessions.json
+    local sessions_json="$YOLO_DIR/sessions.json"
+    if [ -f "$sessions_json" ] && command -v jq >/dev/null 2>&1; then
+        jq --arg s "$safe_name" 'del(.[$s])' "$sessions_json" > "$sessions_json.tmp" \
+            && mv "$sessions_json.tmp" "$sessions_json"
+        # Remove sessions.json if empty
+        if [ "$(jq 'length' "$sessions_json" 2>/dev/null)" = "0" ]; then
+            rm -f "$sessions_json"
+        fi
+    fi
+
+    # Clean up YOLO_DIR if empty
+    rmdir "$YOLO_DIR" 2>/dev/null || true
+
+    success "Worktrees removed"
+}
+
+# ─── Compose Override Generation ──────────────────────────────────────────────
+
+generate_compose_override() {
+    local override_file="$1"
+    shift
+    local mounts=("$@")
+
+    mkdir -p "$(dirname "$override_file")"
+
+    {
+        echo "services:"
+        echo "  claude:"
+        echo "    volumes:"
+        for mount in "${mounts[@]}"; do
+            echo "      - ${mount}"
+        done
+    } > "$override_file"
+}
+
+# ─── Config Sync ──────────────────────────────────────────────────────────────
+
+sync_config_to_container() {
+    local container="$1"
+    local temp_config="/tmp/yolo-${SAFE_NAME}-config-to.json"
+    local temp_claude_dir="/tmp/yolo-${SAFE_NAME}-claude-dir-sync"
+
+    # Sync ~/.claude/ directory (statusline, settings, etc.)
+    if [ -d "$HOME/.claude" ]; then
+        (
+            rm -rf "$temp_claude_dir"
+            mkdir -p "$temp_claude_dir"
+            # Copy non-transient config files (skip large/session-specific dirs)
+            rsync -a --delete \
+                --exclude '.credentials.json' \
+                --exclude 'backups/' \
+                --exclude 'chrome/' \
+                --exclude 'debug/' \
+                --exclude 'file-history/' \
+                --exclude 'history.jsonl' \
+                --exclude 'mcp-needs-auth-cache.json' \
+                --exclude 'paste-cache' \
+                --exclude 'plugins/' \
+                --exclude 'projects/' \
+                --exclude 'todos/' \
+                --exclude '.DS_Store' \
+                "$HOME/.claude/" "$temp_claude_dir/"
+            # Transform paths in JSON files only
+            if [ -n "${HOST_HOME:-}" ]; then
+                find "$temp_claude_dir" -name '*.json' -type f -exec \
+                    sed -i '' "s|${HOST_HOME}|${CONTAINER_HOME}|g" {} +
+            fi
+            docker cp "$temp_claude_dir/." "$container:/home/claude/.claude/" >/dev/null 2>&1
+            rm -rf "$temp_claude_dir"
+        ) &
+        local pid=$!
+        if [ -t 1 ]; then
+            start_spinner "Syncing ~/.claude/ to container..." $pid
+        else
+            echo "Syncing ~/.claude/ to container..."
+        fi
+        wait $pid
+        success "~/.claude/ synced"
+    fi
+
+    # Sync ~/.claude.json
+    if [ ! -f "$HOME/.claude.json" ]; then
+        info "Creating empty config in container..."
+        docker exec "$container" sh -c 'echo "{}" > /home/claude/.claude.json' >/dev/null 2>&1
+        return
+    fi
+
+    (
+        transform_paths_for_container "$HOME/.claude.json" "$temp_config"
+        if command -v jq >/dev/null 2>&1; then
+            # Restore project keys to host paths (container mounts dirs at host paths,
+            # so Claude Code looks up trust by host path, not /home/claude path).
+            # Also set container overrides and accept trust for WORKDIR + worktree paths.
+            local trust_filter='.installMethod = "native" | .skipDangerousModePermissionPrompt = true'
+            trust_filter+=' | .projects = (.projects // {} | to_entries | map(.key = (.key | gsub($from; $to))) | from_entries)'
+            trust_filter+=" | .projects[\"${WORKDIR}\"].hasTrustDialogAccepted = true"
+            jq --arg from "$CONTAINER_HOME" --arg to "$HOST_HOME" \
+                "$trust_filter" "$temp_config" > "$temp_config.tmp" \
+                && mv "$temp_config.tmp" "$temp_config"
+        fi
+        docker cp "$temp_config" "$container:/home/claude/.claude.json" >/dev/null 2>&1
+        rm -f "$temp_config"
+    ) &
+    local pid=$!
+    if [ -t 1 ]; then
+        start_spinner "Syncing .claude.json to container..." $pid
+    else
+        echo "Syncing .claude.json to container..."
+    fi
+    wait $pid
+    success ".claude.json synced"
+}
+
+# ─── Version Management ───────────────────────────────────────────────────────
+
+version_lt() {
+    [ "$1" = "$2" ] && return 1
+    local lower
+    lower=$(printf '%s\n%s' "$1" "$2" | sort -V | head -n1)
+    [ "$lower" = "$1" ]
+}
+
+ensure_claude_version() {
+    local container="$1"
+    local container_version
+    container_version=$(docker exec "$container" claude --version 2>/dev/null | awk '{print $1}') || true
+    if [ -n "$container_version" ]; then
+        info "Claude Code v${container_version}"
+    fi
+}
+
+# ─── Tmux Attachment & Session Recovery ────────────────────────────────────────
+
+attach_to_claude() {
+    local container="$1"
+    local session="$2"
+
+    # Check if session exists
+    if docker exec "$container" tmux has-session -t "$session" 2>/dev/null; then
+        docker exec -it "$container" tmux attach -t "$session"
+        return
+    fi
+
+    # Try waiting briefly (might be starting up)
+    local found=false
+    for i in $(seq 1 30); do
+        if docker exec "$container" tmux has-session -t "$session" 2>/dev/null; then
+            found=true
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [ "$found" = "true" ]; then
+        docker exec -it "$container" tmux attach -t "$session"
+        return
+    fi
+
+    # Session doesn't exist — auto-recover
+    warning "Tmux session not found (may have been killed with Ctrl-C)"
+    echo -e "  ${DIM}Tip: Use ${BOLD}Ctrl-B d${RESET}${DIM} to detach (not Ctrl-C)${RESET}"
+    echo ""
+
+    step "Creating new tmux session"
+    local claude_model="${CLAUDE_MODEL:-claude-opus-4-6}"
+    local session_workdir="$WORKDIR"
+    if [ -n "${YOLO_SESSION_BASE:-}" ]; then
+        local wt_candidate="$YOLO_SESSION_BASE/$(basename "$WORKDIR")"
+        if [ -d "$wt_candidate" ]; then
+            session_workdir="$wt_candidate"
+        fi
+    fi
+    docker exec "$container" tmux new-session -d -s "$session" -n claude -c "$session_workdir"
+    docker exec "$container" tmux send-keys -t "$session" \
+        "claude --dangerously-skip-permissions --model $claude_model" Enter
+    success "New session created"
+    echo ""
+    docker exec -it "$container" tmux attach -t "$session"
+}
+
+# ─── Usage ─────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+Usage: yolo <command> <session> [options]
+
+Commands:
+  up <session>              Start or reattach to a session (idempotent)
+  down <session>            Stop container, prompt for worktree cleanup
+  cp <session> <file...>    Copy files into a running session's workdir
+  path <session>            Print worktree base path for a session
+  path <project>/<session>  Same, but specify project instead of inferring from cwd
+  status [session]          Show container status and worktree info
+  ps                        Show all sessions across all projects
+  version                   Print yolo version
+  update                    Update yolo to the latest release
+
+Arguments:
+  <session>       Session name (used for branches, container name, tmux session)
+                  Example: feat/implement-cool-feature
+  <project>       Project directory name (defaults to basename of cwd)
+
+Options:
+  --verbose, -v   Show detailed output (Docker build logs, etc.)
+  --version       Print yolo version
+  -h, --help      Show this help
+
+Auth: auto-extracts OAuth from macOS Keychain, or set ANTHROPIC_API_KEY.
+
+Config management:
+  ~/.claude is mounted read-only and copied into the container at startup.
+  Path transforms (\$HOST_HOME -> /home/claude) run on the copy only.
+
+Tmux shortcuts (inside the session):
+  Ctrl-B d        Detach (container keeps running)
+  Ctrl-B Shift-N  New Claude window
+  Ctrl-B n/p      Next/previous window
+  Ctrl-B w        List all windows
+
+Examples:
+  yolo up feat/implement-cool-feature
+  yolo down feat/implement-cool-feature
+  yolo status
+  yolo update
+EOF
+}
+
+# ─── Command Dispatcher ───────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "--version" ]]; then
+    echo "yolo $YOLO_VERSION"
+    exit 0
+fi
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+COMMAND="${1:-}"
+if [ -z "$COMMAND" ]; then
+    usage
+    exit 1
+fi
+shift
+
+# Commands that don't require a session name
+if [ "$COMMAND" = "ps" ]; then
+    YOLO_BASE="$YOLO_HOME"
+    FOUND_ANY=false
+
+    for project_dir in "$YOLO_BASE"/*/; do
+        [ -d "$project_dir" ] || continue
+        PROJECT=$(basename "$project_dir")
+
+        # Find session directories (contain worktrees or override files)
+        SESSIONS=()
+        for session_dir in "$project_dir"*/; do
+            [ -d "$session_dir" ] || continue
+            SESSIONS+=("$(basename "$session_dir")")
+        done
+        [ ${#SESSIONS[@]} -gt 0 ] || continue
+
+        if [ "$FOUND_ANY" = "true" ]; then
+            echo ""
+        fi
+        FOUND_ANY=true
+        echo -e "${BOLD}${PROJECT}${RESET}"
+
+        for safe in "${SESSIONS[@]}"; do
+            PREFIX="yolo-${PROJECT}-${safe}"
+            S_STATUS="stopped"
+            CID=$(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml" ps -q claude 2>/dev/null) || true
+            if [ -n "$CID" ]; then
+                S_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || S_STATUS="unknown"
+            fi
+            echo -e "  ${CYAN}${safe}${RESET}: ${S_STATUS}"
+        done
+    done
+
+    if [ "$FOUND_ANY" = "false" ]; then
+        info "No sessions found"
+    fi
+    exit 0
+fi
+
+if [ "$COMMAND" = "path" ]; then
+    ARG="${1:-}"
+    if [ -z "$ARG" ]; then
+        error "Usage: yolo path <session>  or  yolo path <project>/<session>"
+        exit 1
+    fi
+
+    if [[ "$ARG" == */* ]]; then
+        # project/session form (e.g. "code/feat-cool-thing")
+        PROJECT_BASE="${ARG%%/*}"
+        SESSION_NAME="${ARG#*/}"
+    else
+        # session-only form, infer project from cwd
+        PROJECT_BASE="$(basename "$(pwd)")"
+        SESSION_NAME="$ARG"
+    fi
+
+    SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
+    WT_BASE="$YOLO_HOME/$PROJECT_BASE/$SAFE_NAME"
+    if [ ! -d "$WT_BASE" ]; then
+        error "No worktrees found for '$PROJECT_BASE/$SAFE_NAME'"
+        exit 1
+    fi
+    echo "$WT_BASE"
+    exit 0
+fi
+
+if [ "$COMMAND" = "status" ]; then
+    SESSION_NAME="${1:-}"
+
+    PROJECT_DIR="$(pwd)"
+    PROJECT_BASE="$(basename "$PROJECT_DIR")"
+
+    if [ -n "$SESSION_NAME" ]; then
+        SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
+        CONTAINER_PREFIX="yolo-${PROJECT_BASE}-${SAFE_NAME}"
+        COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+
+        CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true
+        if [ -n "$CONTAINER" ]; then
+            STATUS_VAL=$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null) || STATUS_VAL="unknown"
+            echo -e "${BOLD}Session:${RESET} $SESSION_NAME"
+            echo -e "${BOLD}Container:${RESET} $CONTAINER_PREFIX (${STATUS_VAL})"
+        else
+            echo -e "${BOLD}Session:${RESET} $SESSION_NAME"
+            echo -e "${BOLD}Container:${RESET} not running"
+        fi
+
+        WT_BASE="$YOLO_HOME/$PROJECT_BASE/$SAFE_NAME"
+        if [ -d "$WT_BASE" ]; then
+            echo -e "${BOLD}Worktrees:${RESET}"
+            print_session_worktrees "$WT_BASE" "$SAFE_NAME"
+        fi
+    else
+        # Show all sessions with worktree status
+        echo -e "${BOLD}Sessions in $(basename "$PROJECT_DIR"):${RESET}"
+
+        FOUND_ANY=false
+        YOLO_STATUS_DIR="$YOLO_HOME/$PROJECT_BASE"
+        if [ -d "$YOLO_STATUS_DIR" ]; then
+            for session_dir in "$YOLO_STATUS_DIR"/*/; do
+                [ -d "$session_dir" ] || continue
+                safe=$(basename "$session_dir")
+                FOUND_ANY=true
+                PREFIX="yolo-${PROJECT_BASE}-${safe}"
+                S_STATUS="stopped"
+                CID=$(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml" ps -q claude 2>/dev/null) || true
+                if [ -n "$CID" ]; then
+                    S_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || S_STATUS="unknown"
+                fi
+                echo -e "\n  ${CYAN}${safe}${RESET}: ${S_STATUS}"
+                print_session_worktrees "$session_dir" "$safe" "  "
+            done
+        fi
+
+        if [ "$FOUND_ANY" = "false" ]; then
+            info "No sessions found"
+        fi
+    fi
+    exit 0
+fi
+
+if [ "$COMMAND" = "version" ]; then
+    echo "yolo $YOLO_VERSION"
+    exit 0
+fi
+
+if [ "$COMMAND" = "update" ]; then
+    # Check if running from git clone (dev mode)
+    if [ -d "$SCRIPT_DIR/.git" ] && [ ! -f "$YOLO_HOME/bin/yolo" ]; then
+        info "Running from git clone — use ${BOLD}git pull${RESET} to update"
+        exit 0
+    fi
+
+    step "Checking for updates"
+
+    LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${YOLO_REPO}/releases/latest" 2>/dev/null \
+        | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/') || true
+
+    if [ -z "$LATEST_TAG" ]; then
+        error "Could not fetch latest release from GitHub"
+        exit 1
+    fi
+
+    if [ "$LATEST_TAG" = "$YOLO_VERSION" ]; then
+        success "Already up to date (v${YOLO_VERSION})"
+        exit 0
+    fi
+
+    if ! version_lt "$YOLO_VERSION" "$LATEST_TAG"; then
+        success "Already up to date (v${YOLO_VERSION} >= v${LATEST_TAG})"
+        exit 0
+    fi
+
+    info "New version available: v${YOLO_VERSION} → v${LATEST_TAG}"
+
+    DOWNLOAD_URL="https://github.com/${YOLO_REPO}/releases/download/v${LATEST_TAG}/yolo-${LATEST_TAG}.tar.gz"
+    TEMP_DIR=$(mktemp -d)
+    trap "rm -rf '$TEMP_DIR'" EXIT
+
+    (
+        curl -fsSL "$DOWNLOAD_URL" | tar xz -C "$TEMP_DIR"
+    ) &
+    DL_PID=$!
+    if [ -t 1 ]; then
+        start_spinner "Downloading v${LATEST_TAG}..." $DL_PID
+    fi
+    wait $DL_PID || {
+        error "Download failed"
+        exit 1
+    }
+
+    # Install files
+    mkdir -p "$YOLO_HOME/bin" "$YOLO_HOME/lib" "$YOLO_HOME/lib/hooks"
+    cp "$TEMP_DIR/yolo-${LATEST_TAG}/yolo" "$YOLO_HOME/bin/yolo"
+    chmod +x "$YOLO_HOME/bin/yolo"
+    cp "$TEMP_DIR/yolo-${LATEST_TAG}/docker-compose.yml" "$YOLO_HOME/lib/"
+    cp "$TEMP_DIR/yolo-${LATEST_TAG}/Dockerfile" "$YOLO_HOME/lib/"
+    cp "$TEMP_DIR/yolo-${LATEST_TAG}/entrypoint.sh" "$YOLO_HOME/lib/"
+    cp "$TEMP_DIR/yolo-${LATEST_TAG}/tmux.conf" "$YOLO_HOME/lib/"
+    cp "$TEMP_DIR/yolo-${LATEST_TAG}/hooks/"*.sh "$YOLO_HOME/lib/hooks/" 2>/dev/null || true
+    chmod +x "$YOLO_HOME/lib/hooks/"*.sh 2>/dev/null || true
+    echo "$LATEST_TAG" > "$YOLO_HOME/version"
+
+    success "Updated to v${LATEST_TAG}"
+    echo -e "  ${DIM}Release notes: https://github.com/${YOLO_REPO}/releases/tag/v${LATEST_TAG}${RESET}"
+    exit 0
+fi
+
+# Validate command before checking session name
+case "$COMMAND" in
+    up|down|auth|cp|path|status|ps|version|update) ;;
+    *)
+        error "Unknown command: $COMMAND"
+        echo ""
+        usage
+        exit 1
+        ;;
+esac
+
+# Commands that require a session name
+SESSION_NAME="${1:-}"
+if [ -z "$SESSION_NAME" ]; then
+    error "Session name required. Example: yolo $COMMAND feat/implement-cool-feature"
+    exit 1
+fi
+shift
+
+# Remove --verbose/-v from remaining args
+REMAINING_ARGS=()
+if [ $# -gt 0 ]; then
+for i in $(seq 1 $#); do
+    arg="${!i}"
+    if [ "$arg" != "--verbose" ] && [ "$arg" != "-v" ]; then
+        REMAINING_ARGS+=("$arg")
+    fi
+done
+fi
+
+SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
+PROJECT_DIR="$(pwd)"
+PROJECT_BASE="$(basename "$PROJECT_DIR")"
+CONTAINER_PREFIX="yolo-${PROJECT_BASE}-${SAFE_NAME}"
+YOLO_DIR="$YOLO_HOME/$PROJECT_BASE"
+
+export HOST_HOME="$HOME"
+export WORKDIR="$PROJECT_DIR"
+export SESSION_NAME
+export CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
+export CLAUDE_VERSION="$(claude --version 2>/dev/null | awk '{print $1}' || true)"
+export HOST_UID="$(id -u)"
+export HOST_GID="$(id -g)"
+export YOLO_SESSION_BASE="$YOLO_DIR/$SAFE_NAME"
+# Pass host timezone to container (macOS stores it in /etc/localtime symlink)
+if [ -z "${TZ:-}" ]; then
+    export TZ=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||')
+fi
+
+OVERRIDE_FILE="$YOLO_DIR/$SAFE_NAME/docker-compose.override.yml"
+
+case "$COMMAND" in
+  up)
+    # Detect git repos
+    step "Detecting git repos"
+    ensure_git_repos "$PROJECT_DIR"
+
+    for r in "${REPOS[@]}"; do
+        info "Found: $(basename "$r")"
+    done
+
+    # Extract GH_TOKEN for container use (if gh is available)
+    if [ -z "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
+        export GH_TOKEN="$(gh auth token 2>/dev/null || true)"
+    fi
+
+    # Create worktrees on host before starting container
+    step "Setting up worktrees"
+    export YOLO_REPOS=$(IFS='|'; echo "${REPOS[*]}")
+    export YOLO_SESSION_BASE="$YOLO_DIR/$SAFE_NAME"
+    mkdir -p "$YOLO_SESSION_BASE"
+    WORKTREE_PATH=$("$YOLO_LIB/hooks/worktree-create.sh" "$SESSION_NAME")
+    export WORKDIR="$WORKTREE_PATH"
+    update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "${REPOS[@]}"
+
+    # Resolve mounts
+    readarray -t MOUNTS < <(resolve_git_mounts "$PROJECT_DIR" "$SAFE_NAME" "${REPOS[@]}")
+
+    # Persist Claude session data across container recreations
+    CLAUDE_PROJECTS_DIR="$YOLO_SESSION_BASE/.claude-projects"
+    mkdir -p "$CLAUDE_PROJECTS_DIR"
+    MOUNTS+=("$CLAUDE_PROJECTS_DIR:/home/claude/.claude/projects")
+
+    # Add extra mounts from ~/.yolo/mounts (one host path per line, mounted read-only)
+    if [ -f "$YOLO_HOME/mounts" ]; then
+        while IFS= read -r mount_path || [ -n "$mount_path" ]; do
+            mount_path="${mount_path%%#*}"   # strip comments
+            mount_path="${mount_path%"${mount_path##*[! ]}"}"  # trim trailing whitespace
+            mount_path="${mount_path#"${mount_path%%[! ]*}"}"  # trim leading whitespace
+            [ -z "$mount_path" ] && continue
+            # Expand ~ to $HOME
+            mount_path="${mount_path/#\~/$HOME}"
+            if [ -e "$mount_path" ]; then
+                MOUNTS+=("${mount_path}:${mount_path}:ro")
+            else
+                warning "Extra mount path not found: $mount_path"
+            fi
+        done < "$YOLO_HOME/mounts"
+    fi
+
+    # Generate compose override
+    generate_compose_override "$OVERRIDE_FILE" "${MOUNTS[@]}"
+
+    COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml" -f "$OVERRIDE_FILE")
+
+    # Authenticate
+    step "Authenticating"
+    require_auth
+
+    # Check if container is already running
+    EXISTING_CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true
+
+    # Detect config changes via file hash (fast — avoids slow docker compose up)
+    HASH_FILE="$YOLO_DIR/$SAFE_NAME/.config-hash"
+    CONFIG_HASH=$(cat "$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+    STORED_HASH=""
+    [ -f "$HASH_FILE" ] && STORED_HASH=$(cat "$HASH_FILE")
+
+    if [ -n "$EXISTING_CONTAINER" ] && [ "$CONFIG_HASH" = "$STORED_HASH" ]; then
+        # Fast path: container running, no config changes — sync and reattach
+        success "Container already running"
+        step "Checking versions"
+        ensure_claude_version "$EXISTING_CONTAINER"
+        step "Syncing configuration"
+        sync_config_to_container "$EXISTING_CONTAINER"
+        echo ""
+        step "Attaching to tmux session"
+        attach_to_claude "$EXISTING_CONTAINER" "$SESSION_NAME"
+        exit 0
+    fi
+
+    # Either no container, or config changed — let compose handle it
+    if [ -n "$EXISTING_CONTAINER" ]; then
+        info "Config changed, recreating container..."
+        export CLAUDE_CONTINUE=true
+    fi
+
+    step "Starting Claude Code container"
+    if [ "$VERBOSE" = "true" ]; then
+        "${COMPOSE[@]}" up -d --build --wait
+    else
+        (
+            "${COMPOSE[@]}" up -d --build --wait >/dev/null 2>&1
+        ) &
+        BG_PID=$!
+        local spinner_msg
+        if [ -z "$EXISTING_CONTAINER" ]; then
+            spinner_msg="First run — building container (this takes a few minutes)..."
+        else
+            spinner_msg="Rebuilding container..."
+        fi
+        if [ -t 1 ]; then
+            start_spinner "$spinner_msg" $BG_PID
+        else
+            echo "$spinner_msg"
+        fi
+        wait $BG_PID
+    fi
+    success "Container started"
+
+    # Store config hash for future change detection
+    echo "$CONFIG_HASH" > "$HASH_FILE"
+
+    CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null)
+
+    # Attach (entrypoint handles config setup for fresh containers)
+    echo ""
+    step "Attaching to tmux session"
+    echo -e "  ${DIM}Tip: ${BOLD}Ctrl-B d${RESET}${DIM} to detach (container keeps running)${RESET}"
+    attach_to_claude "$CONTAINER" "$SESSION_NAME"
+    ;;
+
+  down)
+    COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+    # Add override file if it exists
+    if [ -f "$OVERRIDE_FILE" ]; then
+        COMPOSE+=(-f "$OVERRIDE_FILE")
+    fi
+
+    step "Stopping container"
+    (
+        "${COMPOSE[@]}" down >/dev/null 2>&1
+    ) &
+    BG_PID=$!
+    if [ -t 1 ]; then
+        start_spinner "Shutting down..." $BG_PID
+    else
+        echo "Shutting down..."
+    fi
+    wait $BG_PID
+    success "Container stopped"
+
+    # Worktree cleanup
+    readarray -t REPOS < <(detect_git_repos "$PROJECT_DIR")
+    if [ ${#REPOS[@]} -gt 0 ]; then
+        cleanup_worktrees "$SESSION_NAME" "$SAFE_NAME" "${REPOS[@]}"
+    fi
+
+    # Clean up temp files
+    rm -rf "/tmp/yolo-${SAFE_NAME}-"* 2>/dev/null
+    ;;
+
+  cp)
+    if [ ${#REMAINING_ARGS[@]} -eq 0 ]; then
+        error "No files specified. Usage: yolo cp <session> <file...>"
+        exit 1
+    fi
+
+    COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+    if [ -f "$OVERRIDE_FILE" ]; then
+        COMPOSE+=(-f "$OVERRIDE_FILE")
+    fi
+
+    CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true
+    if [ -z "$CONTAINER" ]; then
+        error "Session '$SESSION_NAME' is not running"
+        exit 1
+    fi
+
+    DEST=$(docker exec "$CONTAINER" printenv WORKDIR 2>/dev/null) || true
+    if [ -z "$DEST" ]; then
+        error "Could not determine working directory for session '$SESSION_NAME'"
+        exit 1
+    fi
+
+    FAILED=0
+    for src in "${REMAINING_ARGS[@]}"; do
+        if [ ! -e "$src" ]; then
+            error "Not found: $src"
+            FAILED=$((FAILED + 1))
+            continue
+        fi
+        BASENAME="$(basename "$src")"
+        if docker cp "$src" "$CONTAINER:$DEST/$BASENAME" 2>/dev/null; then
+            success "Copied $src → $DEST/$BASENAME"
+        else
+            error "Failed to copy: $src"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+
+    [ $FAILED -gt 0 ] && exit 1
+    ;;
+
+  *)
+    error "Unknown command: $COMMAND"
+    echo ""
+    usage
+    exit 1
+    ;;
+esac
