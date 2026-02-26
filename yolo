@@ -949,17 +949,28 @@ case "$COMMAND" in
     mkdir -p "$CLAUDE_PROJECTS_DIR"
     MOUNTS+=("$CLAUDE_PROJECTS_DIR:/home/claude/.claude/projects")
 
-    # Add extra mounts from ~/.yolo/mounts (one host path per line, mounted read-only)
+    # Add extra mounts from ~/.yolo/mounts (one host path per line)
+    # Paths are mounted read-only by default; append :rw for read-write
     if [ -f "$YOLO_HOME/mounts" ]; then
         while IFS= read -r mount_path || [ -n "$mount_path" ]; do
             mount_path="${mount_path%%#*}"   # strip comments
             mount_path="${mount_path%"${mount_path##*[! ]}"}"  # trim trailing whitespace
             mount_path="${mount_path#"${mount_path%%[! ]*}"}"  # trim leading whitespace
             [ -z "$mount_path" ] && continue
+            # Detect :rw or :ro suffix (default: ro)
+            mode="ro"
+            if [[ "$mount_path" == *:rw ]]; then
+                mode="rw"
+                mount_path="${mount_path%:rw}"
+            elif [[ "$mount_path" == *:ro ]]; then
+                mount_path="${mount_path%:ro}"
+            fi
+            # Trim trailing whitespace from path (handles "~/path :rw")
+            mount_path="${mount_path%"${mount_path##*[! ]}"}"
             # Expand ~ to $HOME
             mount_path="${mount_path/#\~/$HOME}"
             if [ -e "$mount_path" ]; then
-                MOUNTS+=("${mount_path}:${mount_path}:ro")
+                MOUNTS+=("${mount_path}:${mount_path}:${mode}")
             else
                 warning "Extra mount path not found: $mount_path"
             fi

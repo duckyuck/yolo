@@ -23,9 +23,9 @@ Each session gets its own container, branch, and git worktree — so Claude work
 |  +--------------+      +--------------+             |
 |       |                         |                   |
 |       v                         v                   |
-|  ~/.yolo/project/         ~/.yolo/project/           |
-|    feat-auth/               fix-header-bug/          |
-|    (git worktree)           (git worktree)           |
+|  ~/.yolo/project/         ~/.yolo/project/          |
+|    feat-auth/               fix-header-bug/         |
+|    (git worktree)           (git worktree)          |
 +-----------------------------------------------------+
 ```
 
@@ -233,9 +233,10 @@ Need the container to see additional host directories? Add them to `~/.yolo/moun
 ~/shared-configs
 /opt/datasets
 ~/other-project    # comments are fine
+~/scratch:rw       # read-write mount
 ```
 
-All extra mounts are read-only inside the container.
+Extra mounts are read-only by default. Append `:rw` to mount read-write.
 
 ### Environment Variables
 
