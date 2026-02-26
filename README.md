@@ -4,7 +4,7 @@
 
 Claude Code is great, but babysitting it through permission prompts gets old fast. yolo throws Claude into a Docker container with `--dangerously-skip-permissions` so it can actually get work done while you go do something else — like grab coffee, review a PR, or spin up *another* Claude on a different task.
 
-Each session gets its own container, branch, and git worktree — so Claude works on an isolated copy of your code, not your working directory. Run as many as you want in parallel. They can't see each other, they can't mess up your host, and you don't have to sit there approving every `mkdir`.
+Each session gets its own container, branch, and git worktree — so Claude works on an isolated copy of your code, not your working directory. Got a project with multiple repos? yolo picks them all up and creates a worktree for each one. Run as many sessions as you want in parallel. They can't see each other, they can't mess up your host, and you don't have to sit there approving every `mkdir`.
 
 ```
 +-----------------------------------------------------+
@@ -62,7 +62,7 @@ yolo down my-feature        # stops container, offers to clean up worktrees
 
 A lot, actually — but you don't have to think about any of it:
 
-1. Detects git repos in your project directory
+1. Detects all git repos in your project directory (supports multiple repos side-by-side)
 2. Creates a git worktree on a new branch named after your session
 3. Builds a Docker container with Claude Code, git, tmux, and GitHub CLI
 4. Mounts the worktree, your SSH keys, git config, and Claude config
