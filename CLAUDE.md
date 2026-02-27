@@ -42,7 +42,7 @@ There are no tests, linters, or build steps — the project is a set of shell sc
 
 The project has seven files that form a pipeline:
 
-1. **`yolo`** — Host-side CLI orchestrator (bash). Handles session lifecycle, credential extraction, worktree creation, compose override generation, and container attachment. All user interaction happens here.
+1. **`yolo`** — Host-side CLI orchestrator (bash). Handles session lifecycle, credential extraction, worktree creation, compose override generation, and container attachment. All user interaction happens here. If the project directory has no git repos, it offers to `git init` one so yolo can be used from a blank directory.
 
 2. **`docker-compose.yml`** — Service definition. Defines base volume mounts (gitconfig, SSH keys, Claude config) and environment variables. The `yolo` script generates a `docker-compose.override.yml` per session with additional mounts.
 
