@@ -937,7 +937,19 @@ case "$COMMAND" in
     export YOLO_REPOS=$(IFS='|'; echo "${REPOS[*]}")
     export YOLO_SESSION_BASE="$YOLO_DIR/$SAFE_NAME"
     mkdir -p "$YOLO_SESSION_BASE"
-    WORKTREE_PATH=$("$YOLO_LIB/hooks/worktree-create.sh" "$SESSION_NAME")
+    WT_STDERR=$(mktemp)
+    WORKTREE_PATH=$("$YOLO_LIB/hooks/worktree-create.sh" "$SESSION_NAME" 2>"$WT_STDERR")
+    while IFS= read -r line; do
+        case "$line" in
+            exists:*)  info "Reusing worktree: ${line#exists:}" ;;
+            reused:*)  IFS=: read -r _ repo branch <<< "$line"
+                       info "Existing branch $branch in $repo" ;;
+            created:*) IFS=: read -r _ repo branch <<< "$line"
+                       success "Created worktree: $repo → $branch" ;;
+            *)         [ -n "$line" ] && echo "$line" >&2 ;;
+        esac
+    done < "$WT_STDERR"
+    rm -f "$WT_STDERR"
     export WORKDIR="$WORKTREE_PATH"
     update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "${REPOS[@]}"
 

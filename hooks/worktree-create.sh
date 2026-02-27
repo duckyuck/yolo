@@ -36,7 +36,7 @@ for repo_path in "${REPOS[@]}"; do
 
     # Idempotent: skip if worktree already exists
     if [ -d "$wt_path" ] && { [ -d "$wt_path/.git" ] || [ -f "$wt_path/.git" ]; }; then
-        echo "Worktree already exists: $repo_name" >&2
+        echo "exists:$repo_name" >&2
         continue
     fi
 
@@ -52,13 +52,12 @@ for repo_path in "${REPOS[@]}"; do
 
     # Create worktree
     if git -C "$repo_path" rev-parse --verify "$NAME" >/dev/null 2>&1; then
-        echo "Branch '$NAME' exists, attaching worktree in $repo_name" >&2
         git -C "$repo_path" worktree add "$wt_path" "$NAME" >/dev/null 2>&1
+        echo "reused:$repo_name:$NAME" >&2
     else
         git -C "$repo_path" worktree add -b "$NAME" "$wt_path" "$start_point" >/dev/null 2>&1
+        echo "created:$repo_name:$NAME" >&2
     fi
-
-    echo "Created worktree: $repo_name -> $NAME" >&2
 done
 
 # Return path: single repo = worktree path, multi-repo = session base

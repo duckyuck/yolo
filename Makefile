@@ -5,10 +5,14 @@ TARBALL := $(DIST)/yolo-$(VERSION).tar.gz
 REPO    := sourcemagnet/yolo
 FILES   := yolo docker-compose.yml Dockerfile entrypoint.sh tmux.conf
 HOOKS   := $(wildcard hooks/*.sh)
+TESTS   := $(wildcard test/test-*.sh)
 
-.PHONY: release clean
+.PHONY: release clean test
 
-release: $(TARBALL)
+test:
+	@for t in $(TESTS); do echo "── $$t"; bash "$$t" || exit 1; echo; done
+
+release: test $(TARBALL)
 	gh release create "v$(VERSION)" $(TARBALL) --repo $(REPO) --generate-notes
 	@echo ""
 	@echo "Released v$(VERSION): https://github.com/$(REPO)/releases/tag/v$(VERSION)"
