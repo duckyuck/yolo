@@ -135,16 +135,35 @@ transform_paths_for_container() {
 
 # ─── Credential Management ────────────────────────────────────────────────────
 
-has_oauth_credentials() {
-    # Check credentials file has an OAuth access token (file is mounted into the
-    # container, which lets Claude Code refresh the token when it expires)
-    if [ -f "$HOME/.claude/.credentials.json" ]; then
+extract_keychain_credentials() {
+    # Extract OAuth credentials from macOS Keychain (where Claude Code stores them)
+    # and write to ~/.claude/.credentials.json for bind-mounting into the container.
+    local creds_file="$YOLO_HOST_HOME/.claude/.credentials.json"
+
+    # Already exists and has a token — nothing to do
+    if [ -f "$creds_file" ]; then
         local token
-        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
+        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
         [ -n "$token" ] && return 0
     fi
 
-    return 1
+    # Try macOS Keychain
+    if ! command -v security >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local creds
+    creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null) || return 1
+
+    local token
+    token=$(echo "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+    [ -z "$token" ] && return 1
+
+    # Seed the credentials file (bind-mounted read-write into the container,
+    # so Claude Code can refresh the token during long sessions)
+    mkdir -p "$(dirname "$creds_file")"
+    echo "$creds" > "$creds_file"
+    return 0
 }
 
 require_auth() {
@@ -152,8 +171,8 @@ require_auth() {
         return
     fi
 
-    if has_oauth_credentials; then
-        info "Using OAuth credentials from host"
+    if extract_keychain_credentials; then
+        info "Using OAuth credentials from macOS Keychain"
         return
     fi
 
@@ -162,7 +181,7 @@ require_auth() {
     echo "  export CLAUDE_CODE_OAUTH_TOKEN=..." >&2
     echo "" >&2
     echo "  For Max/Pro subscribers with Claude Code on the host:" >&2
-    echo "    claude auth login    (creates ~/.claude/.credentials.json)" >&2
+    echo "    claude auth login" >&2
     exit 1
 }
 

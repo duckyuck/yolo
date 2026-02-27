@@ -81,7 +81,7 @@ The project has seven files that form a pipeline:
 
 **Extra mounts** can be added in `~/.yolo/mounts` (one host path per line, mounted read-only).
 
-**Auth priority:** `ANTHROPIC_API_KEY` env var -> `CLAUDE_CODE_OAUTH_TOKEN` env var -> `~/.claude/.credentials.json` OAuth token.
+**Auth priority:** `ANTHROPIC_API_KEY` env var -> `CLAUDE_CODE_OAUTH_TOKEN` env var -> macOS Keychain OAuth token (extracted to `~/.claude/.credentials.json` at `yolo up` time).
 
 ## README Style
 
