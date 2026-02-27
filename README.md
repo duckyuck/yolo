@@ -238,6 +238,28 @@ Need the container to see additional host directories? Add them to `~/.yolo/moun
 
 Extra mounts are read-only by default. Append `:rw` to mount read-write.
 
+### Compose Overrides
+
+Need to expose ports, add capabilities, or tweak the container config? Drop a standard Docker Compose override file and yolo picks it up automatically:
+
+```yaml
+# ~/.yolo/my-project/compose.override.yml
+services:
+  claude:
+    ports:
+      - "3000:3000"
+      - "8080:8080"
+```
+
+Two levels are supported — global overrides apply to all projects, per-project overrides apply to one:
+
+| File | Scope |
+|---|---|
+| `~/.yolo/compose.override.yml` | All projects |
+| `~/.yolo/<project>/compose.override.yml` | Single project |
+
+Both are merged in order (global first, then per-project) using Docker Compose's native `-f` file merging. Changes to override files trigger container recreation on next `yolo up`.
+
 ### Environment Variables
 
 | Variable | Default | Description |
@@ -321,7 +343,9 @@ yolo down feat/x
 │       ├── worktree-create.sh  # worktree creation
 │       └── worktree-remove.sh  # worktree cleanup
 ├── mounts                      # extra mount paths (user-created)
+├── compose.override.yml        # global compose override (optional)
 └── <project>/
+    ├── compose.override.yml    # per-project compose override (optional)
     ├── sessions.json           # worktree-to-repo mapping
     └── <session>/
         ├── docker-compose.override.yml

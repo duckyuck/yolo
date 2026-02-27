@@ -473,6 +473,20 @@ generate_compose_override() {
     } > "$override_file"
 }
 
+# ─── User Compose Overrides ───────────────────────────────────────────────
+
+# Collect user compose override files (global + per-project).
+# Prints existing override file paths, one per line.
+# Usage: collect_user_overrides <yolo_home> <project_base>
+collect_user_overrides() {
+    local yolo_home="$1"
+    local project_base="$2"
+    local f
+    for f in "$yolo_home/compose.override.yml" "$yolo_home/$project_base/compose.override.yml"; do
+        [ -f "$f" ] && echo "$f" || true
+    done
+}
+
 # ─── Config Sync ──────────────────────────────────────────────────────────────
 
 sync_config_to_container() {
@@ -1016,6 +1030,12 @@ case "$COMMAND" in
 
     COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml" -f "$OVERRIDE_FILE")
 
+    # Append user compose overrides (global + per-project)
+    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE")
+    for uf in "${USER_OVERRIDES[@]}"; do
+        COMPOSE+=(-f "$uf")
+    done
+
     # Authenticate
     step "Authenticating"
     require_auth
@@ -1025,7 +1045,7 @@ case "$COMMAND" in
 
     # Detect config changes via file hash (fast — avoids slow docker compose up)
     HASH_FILE="$YOLO_DIR/$SAFE_NAME/.config-hash"
-    CONFIG_HASH=$(cat "$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+    CONFIG_HASH=$(cat "$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" "${USER_OVERRIDES[@]}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
     STORED_HASH=""
     [ -f "$HASH_FILE" ] && STORED_HASH=$(cat "$HASH_FILE")
 
@@ -1096,6 +1116,11 @@ case "$COMMAND" in
     if [ -f "$OVERRIDE_FILE" ]; then
         COMPOSE+=(-f "$OVERRIDE_FILE")
     fi
+    # Append user compose overrides (global + per-project)
+    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE")
+    for uf in "${USER_OVERRIDES[@]}"; do
+        COMPOSE+=(-f "$uf")
+    done
 
     step "Stopping container"
     (
@@ -1130,6 +1155,11 @@ case "$COMMAND" in
     if [ -f "$OVERRIDE_FILE" ]; then
         COMPOSE+=(-f "$OVERRIDE_FILE")
     fi
+    # Append user compose overrides (global + per-project)
+    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE")
+    for uf in "${USER_OVERRIDES[@]}"; do
+        COMPOSE+=(-f "$uf")
+    done
 
     CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true
     if [ -z "$CONTAINER" ]; then
