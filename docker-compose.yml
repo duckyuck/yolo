@@ -23,16 +23,17 @@ services:
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-4-6}
       CLAUDE_CONTINUE: ${CLAUDE_CONTINUE:-}
       GH_TOKEN: ${GH_TOKEN:-}
+      YOLO_HOST_HOME: ${YOLO_HOST_HOME}
     volumes:
       # Git config (read-only)
-      - ${HOME}/.gitconfig:/home/claude/.gitconfig:ro
+      - ${YOLO_HOST_HOME}/.gitconfig:/home/claude/.gitconfig:ro
 
       # SSH keys (staged read-only, entrypoint creates filtered copy)
-      - ${HOME}/.ssh:/mnt/host-ssh:ro
+      - ${YOLO_HOST_HOME}/.ssh:/mnt/host-ssh:ro
 
       # Claude config (read-only mount, copied into container at startup)
-      - ${HOME}/.claude:/mnt/host-claude:ro
-      - ${HOME}/.claude.json:/mnt/host-claude.json:ro
+      - ${YOLO_HOST_HOME}/.claude:/mnt/host-claude:ro
+      - ${YOLO_HOST_HOME}/.claude.json:/mnt/host-claude.json:ro
 
       # OAuth credentials (read-write so container sees host token refreshes and vice versa)
-      - ${HOME}/.claude/.credentials.json:/home/claude/.claude/.credentials.json
+      - ${YOLO_HOST_HOME}/.claude/.credentials.json:/home/claude/.claude/.credentials.json

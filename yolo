@@ -11,7 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || ec
 YOLO_VERSION="0.1.0"
 YOLO_REPO="sourcemagnet/yolo"
 
-YOLO_HOME="${YOLO_HOME:-$HOME/.yolo}"
+export YOLO_HOST_HOME="${YOLO_HOST_HOME:-$HOME}"
+YOLO_HOME="${YOLO_HOME:-$YOLO_HOST_HOME/.yolo}"
 
 # Resolve support file directory: installed layout > dev mode (co-located)
 if [ -n "${YOLO_LIB:-}" ]; then
@@ -117,7 +118,7 @@ step()    { echo -e "\n${BOLD}${MAGENTA}▸${RESET} ${BOLD}$1${RESET}"; }
 
 # ─── Path Transforms ──────────────────────────────────────────────────────────
 
-HOST_HOME="$HOME"
+HOST_HOME="$YOLO_HOST_HOME"
 CONTAINER_HOME="/home/claude"
 
 transform_paths_for_container() {
@@ -902,7 +903,7 @@ PROJECT_BASE="$(basename "$PROJECT_DIR")"
 CONTAINER_PREFIX="yolo-${PROJECT_BASE}-${SAFE_NAME}"
 YOLO_DIR="$YOLO_HOME/$PROJECT_BASE"
 
-export HOST_HOME="$HOME"
+export HOST_HOME="$YOLO_HOST_HOME"
 export WORKDIR="$PROJECT_DIR"
 export SESSION_NAME
 export CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
@@ -979,8 +980,8 @@ case "$COMMAND" in
             fi
             # Trim trailing whitespace from path (handles "~/path :rw")
             mount_path="${mount_path%"${mount_path##*[! ]}"}"
-            # Expand ~ to $HOME
-            mount_path="${mount_path/#\~/$HOME}"
+            # Expand ~ to $YOLO_HOST_HOME
+            mount_path="${mount_path/#\~/$YOLO_HOST_HOME}"
             if [ -e "$mount_path" ]; then
                 MOUNTS+=("${mount_path}:${mount_path}:${mode}")
             else
@@ -988,6 +989,14 @@ case "$COMMAND" in
             fi
         done < "$YOLO_HOME/mounts"
     fi
+
+    # Docker socket (enables nested yolo — Docker outside of Docker)
+    if [ -S /var/run/docker.sock ]; then
+        MOUNTS+=("/var/run/docker.sock:/var/run/docker.sock")
+    fi
+
+    # Mount .yolo directory at host path (inner yolo needs it for worktree/session state)
+    MOUNTS+=("$YOLO_HOME:$YOLO_HOME")
 
     # Generate compose override
     generate_compose_override "$OVERRIDE_FILE" "${MOUNTS[@]}"
@@ -1034,7 +1043,6 @@ case "$COMMAND" in
             "${COMPOSE[@]}" up -d --build --wait >/dev/null 2>&1
         ) &
         BG_PID=$!
-        local spinner_msg
         if [ -z "$EXISTING_CONTAINER" ]; then
             spinner_msg="First run — building container (this takes a few minutes)..."
         else

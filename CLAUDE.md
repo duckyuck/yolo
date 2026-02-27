@@ -36,7 +36,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./yolo up <name> --verbose
 ```
 
-There are no tests, linters, or build steps — the project is a set of shell scripts and Docker configuration.
+```bash
+# Run all tests (auto-discovers test/test-*.sh)
+make test
+
+# Package and publish a GitHub release (runs tests first)
+make release
+```
+
+Tests live in `test/test-*.sh`. Add new test files matching that pattern and `make test` picks them up automatically.
 
 ## Architecture
 
@@ -78,6 +86,13 @@ The project has seven files that form a pipeline:
 ## README Style
 
 The README has a casual, opinionated tone (e.g. "Stop clicking yes every 30 seconds. Let Claude Code off the leash."). When updating the README for feature changes, only change the parts that are factually wrong or outdated — do not rewrite the whole file or flatten the tone into dry technical docs. Preserve the personality, humor, and existing structure.
+
+## Testing
+
+- **Write the real test first.** If you can run the actual code path end-to-end (even with stubs for external deps), do that instead of unit-testing fragments in isolation. A test that runs `./yolo up` inside a real container with a stubbed `docker compose up` catches bugs that grepping config files never will.
+- **Don't accumulate redundant tests.** If an e2e test covers the same ground as unit tests, drop the unit tests — they add noise without catching real bugs.
+- **Stub at the boundary, not the logic.** Stub `docker compose up` and `docker exec` (can't build inner images in tests), but let all bash logic run for real inside an actual container.
+- **If a bug wouldn't be caught by existing tests, that's a test gap** — not just a bug to fix.
 
 ## Bash Requirements
 

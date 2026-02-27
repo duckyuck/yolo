@@ -3,6 +3,28 @@ set -euo pipefail
 
 cd "${WORKDIR}"
 
+# --- Docker socket permissions ---
+# When the host's Docker socket is mounted (for nested yolo / Docker outside of Docker),
+# it typically appears as root:root srw-rw---- inside the container. Add the claude user
+# to a group matching the socket's GID so docker commands work without sudo.
+if [ -S /var/run/docker.sock ] && ! docker info >/dev/null 2>&1; then
+    DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
+    if [ "$DOCKER_SOCK_GID" -eq 0 ]; then
+        # Socket owned by root:root — no group trick will help, widen permissions
+        sudo chmod 666 /var/run/docker.sock
+    else
+        # Find or create a group matching the socket's GID, add claude to it
+        DOCKER_GROUP=$(getent group "$DOCKER_SOCK_GID" 2>/dev/null | cut -d: -f1) || true
+        if [ -z "$DOCKER_GROUP" ]; then
+            DOCKER_GROUP="docker-host"
+            sudo groupadd -g "$DOCKER_SOCK_GID" "$DOCKER_GROUP"
+        fi
+        sudo usermod -aG "$DOCKER_GROUP" claude
+        # newgrp activates the group for the rest of this process
+        exec sg "$DOCKER_GROUP" -c "$(printf '%q ' "$0" "$@")"
+    fi
+fi
+
 # --- SSH setup ---
 # Load SSH keys into an agent so git can authenticate, then delete the key files.
 # This prevents Claude from reading private key material while still allowing git operations.
