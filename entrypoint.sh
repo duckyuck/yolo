@@ -9,6 +9,7 @@ cd "${WORKDIR}"
 # to a group matching the socket's GID so docker commands work without sudo.
 if [ -S /var/run/docker.sock ] && ! docker info >/dev/null 2>&1; then
     DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
+    [[ "$DOCKER_SOCK_GID" =~ ^[0-9]+$ ]] || DOCKER_SOCK_GID=0
     if [ "$DOCKER_SOCK_GID" -eq 0 ]; then
         # Socket owned by root:root — no group trick will help, widen permissions
         sudo chmod 666 /var/run/docker.sock
@@ -44,9 +45,9 @@ if [ -d /mnt/host-ssh ]; then
 
     # Filter out macOS-only options from SSH config
     if [ -f /mnt/host-ssh/config ]; then
-        sed -e '/UseKeychain/d' \
-            -e '/IdentityAgent.*1password/d' \
-            -e '/IdentityAgent.*Group Containers/d' \
+        sed -e '/^[[:space:]]*UseKeychain/d' \
+            -e '/^[[:space:]]*IdentityAgent.*1password/d' \
+            -e '/^[[:space:]]*IdentityAgent.*Group Containers/d' \
             /mnt/host-ssh/config > /home/claude/.ssh/config
         chmod 600 /home/claude/.ssh/config
     fi
@@ -101,8 +102,9 @@ if [ -d /mnt/host-claude ]; then
         | tar -C /home/claude/.claude -xf - 2>/dev/null || true
     # Transform host paths to container paths in the local copy
     if [ -n "${HOST_HOME:-}" ]; then
+        escaped_host_home=$(printf '%s\n' "$HOST_HOME" | sed 's/[|&/\]/\\&/g')
         find /home/claude/.claude -name '*.json' ! -name '.credentials.json' -type f -exec \
-            sed -i "s|${HOST_HOME}|/home/claude|g" {} +
+            sed -i "s|${escaped_host_home}|/home/claude|g" {} +
     fi
 fi
 
@@ -112,15 +114,22 @@ fi
 # (container mounts directories at host paths, so Claude looks up trust by host path)
 if [ -f /mnt/host-claude.json ]; then
     if [ -n "${HOST_HOME:-}" ]; then
-        sed "s|${HOST_HOME}|/home/claude|g" /mnt/host-claude.json \
+        escaped_host_home=$(printf '%s\n' "$HOST_HOME" | sed 's/[|&/\]/\\&/g')
+        if ! sed "s|${escaped_host_home}|/home/claude|g" /mnt/host-claude.json \
             | jq --arg from "/home/claude" --arg to "${HOST_HOME}" \
                 '.installMethod = "native"
                 | .skipDangerousModePermissionPrompt = true
                 | .projects = (.projects // {} | to_entries | map(.key = (.key | gsub($from; $to))) | from_entries)' \
-            > /home/claude/.claude.json
+            > /home/claude/.claude.json; then
+            echo "Warning: failed to transform .claude.json, copying as-is" >&2
+            cp /mnt/host-claude.json /home/claude/.claude.json
+        fi
     else
-        jq '.installMethod = "native" | .skipDangerousModePermissionPrompt = true' \
-            /mnt/host-claude.json > /home/claude/.claude.json
+        if ! jq '.installMethod = "native" | .skipDangerousModePermissionPrompt = true' \
+            /mnt/host-claude.json > /home/claude/.claude.json; then
+            echo "Warning: failed to transform .claude.json, copying as-is" >&2
+            cp /mnt/host-claude.json /home/claude/.claude.json
+        fi
     fi
 fi
 

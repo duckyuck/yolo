@@ -52,10 +52,16 @@ for repo_path in "${REPOS[@]}"; do
 
     # Create worktree
     if git -C "$repo_path" rev-parse --verify "$NAME" >/dev/null 2>&1; then
-        git -C "$repo_path" worktree add "$wt_path" "$NAME" >/dev/null 2>&1
+        if ! output=$(git -C "$repo_path" worktree add "$wt_path" "$NAME" 2>&1); then
+            echo "error:$repo_name: $output" >&2
+            continue
+        fi
         echo "reused:$repo_name:$NAME" >&2
     else
-        git -C "$repo_path" worktree add -b "$NAME" "$wt_path" "$start_point" >/dev/null 2>&1
+        if ! output=$(git -C "$repo_path" worktree add -b "$NAME" "$wt_path" "$start_point" 2>&1); then
+            echo "error:$repo_name: $output" >&2
+            continue
+        fi
         echo "created:$repo_name:$NAME" >&2
     fi
 done

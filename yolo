@@ -121,10 +121,16 @@ step()    { echo -e "\n${BOLD}${MAGENTA}▸${RESET} ${BOLD}$1${RESET}"; }
 HOST_HOME="$YOLO_HOST_HOME"
 CONTAINER_HOME="/home/claude"
 
+sed_escape() {
+    printf '%s\n' "$1" | sed 's/[|&/\]/\\&/g'
+}
+
 transform_paths_for_container() {
     local input_file="$1"
     local output_file="$2"
-    sed "s|${HOST_HOME}|${CONTAINER_HOME}|g" "$input_file" > "$output_file"
+    local escaped_from
+    escaped_from=$(sed_escape "$HOST_HOME")
+    sed "s|${escaped_from}|${CONTAINER_HOME}|g" "$input_file" > "$output_file"
 }
 
 # ─── Credential Management ────────────────────────────────────────────────────
@@ -420,7 +426,7 @@ remove_worktrees() {
 
         if [ -d "$wt_path" ]; then
             git -C "$repo_path" worktree remove --force "$wt_path" 2>/dev/null \
-                || { chmod -R -N "$wt_path" 2>/dev/null; rm -rf "$wt_path"; }
+                || { [[ "$(uname)" == "Darwin" ]] && chmod -R -N "$wt_path" 2>/dev/null; rm -rf "$wt_path"; }
         fi
 
         if [ "$delete_branches" = "true" ]; then
@@ -428,7 +434,7 @@ remove_worktrees() {
         fi
     done
 
-    chmod -R -N "$worktree_base" 2>/dev/null
+    [[ "$(uname)" == "Darwin" ]] && chmod -R -N "$worktree_base" 2>/dev/null
     rm -rf "$worktree_base"
 
     # Remove session entry from sessions.json
@@ -496,8 +502,10 @@ sync_config_to_container() {
                 "$HOME/.claude/" "$temp_claude_dir/"
             # Transform paths in JSON files only
             if [ -n "${HOST_HOME:-}" ]; then
+                local escaped_from
+                escaped_from=$(sed_escape "$HOST_HOME")
                 find "$temp_claude_dir" -name '*.json' -type f -exec \
-                    sed -i '' "s|${HOST_HOME}|${CONTAINER_HOME}|g" {} +
+                    sed -i '' "s|${escaped_from}|${CONTAINER_HOME}|g" {} +
             fi
             docker cp "$temp_claude_dir/." "$container:/home/claude/.claude/" >/dev/null 2>&1
             rm -rf "$temp_claude_dir"
@@ -508,8 +516,11 @@ sync_config_to_container() {
         else
             echo "Syncing ~/.claude/ to container..."
         fi
-        wait $pid
-        success "~/.claude/ synced"
+        if ! wait $pid; then
+            warning "Failed to sync ~/.claude/ to container"
+        else
+            success "~/.claude/ synced"
+        fi
     fi
 
     # Sync ~/.claude.json
@@ -541,8 +552,11 @@ sync_config_to_container() {
     else
         echo "Syncing .claude.json to container..."
     fi
-    wait $pid
-    success ".claude.json synced"
+    if ! wait $pid; then
+        warning "Failed to sync .claude.json to container"
+    else
+        success ".claude.json synced"
+    fi
 }
 
 # ─── Version Management ───────────────────────────────────────────────────────
@@ -888,14 +902,9 @@ shift
 
 # Remove --verbose/-v from remaining args
 REMAINING_ARGS=()
-if [ $# -gt 0 ]; then
-for i in $(seq 1 $#); do
-    arg="${!i}"
-    if [ "$arg" != "--verbose" ] && [ "$arg" != "-v" ]; then
-        REMAINING_ARGS+=("$arg")
-    fi
+for arg in "$@"; do
+    [[ "$arg" == "--verbose" || "$arg" == "-v" ]] || REMAINING_ARGS+=("$arg")
 done
-fi
 
 SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
 PROJECT_DIR="$(pwd)"
@@ -918,6 +927,10 @@ fi
 
 OVERRIDE_FILE="$YOLO_DIR/$SAFE_NAME/docker-compose.override.yml"
 
+# Session-scoped temp directory (cleaned on exit/interrupt)
+YOLO_TMPDIR=$(mktemp -d)
+trap 'rm -rf "$YOLO_TMPDIR"' EXIT
+
 case "$COMMAND" in
   up)
     # Detect git repos
@@ -938,7 +951,7 @@ case "$COMMAND" in
     export YOLO_REPOS=$(IFS='|'; echo "${REPOS[*]}")
     export YOLO_SESSION_BASE="$YOLO_DIR/$SAFE_NAME"
     mkdir -p "$YOLO_SESSION_BASE"
-    WT_STDERR=$(mktemp)
+    WT_STDERR="$YOLO_TMPDIR/wt-stderr"
     WORKTREE_PATH=$("$YOLO_LIB/hooks/worktree-create.sh" "$SESSION_NAME" 2>"$WT_STDERR")
     while IFS= read -r line; do
         case "$line" in
@@ -947,10 +960,10 @@ case "$COMMAND" in
                        info "Existing branch $branch in $repo" ;;
             created:*) IFS=: read -r _ repo branch <<< "$line"
                        success "Created worktree: $repo → $branch" ;;
+            error:*)   error "Worktree failed: ${line#error:}" ;;
             *)         [ -n "$line" ] && echo "$line" >&2 ;;
         esac
     done < "$WT_STDERR"
-    rm -f "$WT_STDERR"
     export WORKDIR="$WORKTREE_PATH"
     update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "${REPOS[@]}"
 
@@ -1035,12 +1048,16 @@ case "$COMMAND" in
         export CLAUDE_CONTINUE=true
     fi
 
+    # Ensure .gitconfig exists (Docker bind-mount creates a directory if file is missing)
+    [ -f "$YOLO_HOST_HOME/.gitconfig" ] || touch "$YOLO_HOST_HOME/.gitconfig" 2>/dev/null || true
+
     step "Starting Claude Code container"
     if [ "$VERBOSE" = "true" ]; then
         "${COMPOSE[@]}" up -d --build --wait
     else
+        BUILD_LOG="$YOLO_TMPDIR/build-log"
         (
-            "${COMPOSE[@]}" up -d --build --wait >/dev/null 2>&1
+            "${COMPOSE[@]}" up -d --build --wait >"$BUILD_LOG" 2>&1
         ) &
         BG_PID=$!
         if [ -z "$EXISTING_CONTAINER" ]; then
@@ -1053,7 +1070,11 @@ case "$COMMAND" in
         else
             echo "$spinner_msg"
         fi
-        wait $BG_PID
+        if ! wait $BG_PID; then
+            error "Container build failed:"
+            tail -20 "$BUILD_LOG" | sed 's/^/  /'
+            exit 1
+        fi
     fi
     success "Container started"
 

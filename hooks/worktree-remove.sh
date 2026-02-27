@@ -26,7 +26,7 @@ for repo_path in "${REPOS[@]}"; do
     fi
 
     # Keep if ahead of remote
-    current_branch=$(git -C "$repo_path" rev-parse --abbrev-ref HEAD 2>/dev/null) || current_branch="main"
+    current_branch=$(git -C "$wt_path" rev-parse --abbrev-ref HEAD 2>/dev/null) || current_branch="main"
     ahead=0
     if git -C "$wt_path" rev-parse --verify "origin/$current_branch" >/dev/null 2>&1; then
         ahead=$(git -C "$wt_path" rev-list --count "origin/$current_branch..HEAD" 2>/dev/null) || ahead=0
