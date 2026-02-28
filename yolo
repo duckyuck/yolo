@@ -137,33 +137,65 @@ transform_paths_for_container() {
 
 extract_keychain_credentials() {
     # Extract OAuth credentials from macOS Keychain (where Claude Code stores them)
-    # and write to ~/.claude/.credentials.json for bind-mounting into the container.
+    # and merge with ~/.claude/.credentials.json for bind-mounting into the container.
+    #
+    # Compares expiresAt between Keychain and file — keeps whichever is newer.
+    # This prevents overwriting a token the container refreshed during a session.
+    # Sets CREDENTIALS_REFRESHED=true if the file was updated with a different token.
     local creds_file="$YOLO_HOST_HOME/.claude/.credentials.json"
+    CREDENTIALS_REFRESHED=false
 
-    # Already exists and has a token — nothing to do
+    # Read current file state
+    local file_token="" file_expires="0"
     if [ -f "$creds_file" ]; then
-        local token
-        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
-        [ -n "$token" ] && return 0
+        file_token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
+        file_expires=$(jq -r '.claudeAiOauth.expiresAt // 0' "$creds_file" 2>/dev/null)
     fi
 
-    # Try macOS Keychain
-    if ! command -v security >/dev/null 2>&1; then
-        return 1
+    # Read Keychain state
+    local keychain_creds="" keychain_token="" keychain_expires="0"
+    if command -v security >/dev/null 2>&1; then
+        keychain_creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null) || true
+        if [ -n "$keychain_creds" ]; then
+            keychain_token=$(echo "$keychain_creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+            keychain_expires=$(echo "$keychain_creds" | jq -r '.claudeAiOauth.expiresAt // 0' 2>/dev/null) || true
+        fi
     fi
 
-    local creds
-    creds=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null) || return 1
+    # Use whichever source has the later expiry (don't overwrite a token
+    # the container refreshed with an older one from Keychain)
+    if [ -n "$keychain_token" ] && [ "${keychain_expires:-0}" -ge "${file_expires:-0}" ] 2>/dev/null; then
+        mkdir -p "$(dirname "$creds_file")"
+        echo "$keychain_creds" > "$creds_file"
+        if [ -n "$file_token" ] && [ "$file_token" != "$keychain_token" ]; then
+            CREDENTIALS_REFRESHED=true
+        fi
+        return 0
+    elif [ -n "$file_token" ]; then
+        # File has a newer token — keep it, don't overwrite
+        return 0
+    elif [ -n "$keychain_token" ]; then
+        # File has no token but Keychain does — seed the file
+        mkdir -p "$(dirname "$creds_file")"
+        echo "$keychain_creds" > "$creds_file"
+        return 0
+    fi
 
-    local token
-    token=$(echo "$creds" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-    [ -z "$token" ] && return 1
+    return 1
+}
 
-    # Seed the credentials file (bind-mounted read-write into the container,
-    # so Claude Code can refresh the token during long sessions)
-    mkdir -p "$(dirname "$creds_file")"
-    echo "$creds" > "$creds_file"
-    return 0
+is_token_expired() {
+    # Check if the OAuth access token in the credentials file is expired.
+    local creds_file="$YOLO_HOST_HOME/.claude/.credentials.json"
+    [ -f "$creds_file" ] || return 1
+
+    local expires_at
+    expires_at=$(jq -r '.claudeAiOauth.expiresAt // empty' "$creds_file" 2>/dev/null)
+    [ -n "$expires_at" ] || return 1
+
+    local now_ms
+    now_ms=$(($(date +%s) * 1000))
+    [ "$now_ms" -gt "$expires_at" ] 2>/dev/null
 }
 
 require_auth() {
@@ -172,7 +204,27 @@ require_auth() {
     fi
 
     if extract_keychain_credentials; then
-        info "Using OAuth credentials from macOS Keychain"
+        if is_token_expired; then
+            warning "OAuth token expired"
+            # Try host-side refresh: running any claude command may trigger
+            # an automatic token refresh via the refresh_token grant
+            if command -v claude >/dev/null 2>&1; then
+                info "Attempting token refresh via host Claude Code..."
+                claude auth status >/dev/null 2>&1 || true
+                # Re-extract — Keychain may now have a fresh token
+                extract_keychain_credentials
+            fi
+            if is_token_expired; then
+                warning "Could not auto-refresh token"
+                echo -e "  ${DIM}Run ${BOLD}claude auth login${RESET}${DIM} on the host to re-authenticate${RESET}"
+                echo -e "  ${DIM}Then run ${BOLD}yolo up${RESET}${DIM} again${RESET}"
+                echo ""
+            else
+                success "Token refreshed"
+            fi
+        else
+            info "Using OAuth credentials"
+        fi
         return
     fi
 
@@ -183,6 +235,75 @@ require_auth() {
     echo "  For Max/Pro subscribers with Claude Code on the host:" >&2
     echo "    claude auth login" >&2
     exit 1
+}
+
+# ─── Container Auth Check ─────────────────────────────────────────────────────
+
+check_container_auth() {
+    # Detect stale OAuth inside a running container. If the Claude process has an
+    # expired token in memory, a fresh .credentials.json on disk won't help — we
+    # need to restart the tmux session so Claude picks up the new token.
+    #
+    # Detection (in priority order):
+    #   1. Token expiry — expiresAt in credentials file is in the past. This is the
+    #      most reliable signal and catches the common case where both Keychain and
+    #      file have the same expired token.
+    #   2. CREDENTIALS_REFRESHED — Keychain gave us a different token than what was
+    #      on disk, so the running process definitely has the old one.
+    #   3. Pane content contains "/login" — reactive fallback.
+    #
+    # Skipped for API-key users (keys don't expire).
+    local container="$1"
+    local session="$2"
+
+    # API keys don't expire — nothing to check
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        return 0
+    fi
+
+    local needs_restart=false
+
+    # Primary: check if the OAuth access token has expired
+    if is_token_expired; then
+        needs_restart=true
+    fi
+
+    # Secondary: credentials were refreshed from Keychain (token changed)
+    if [ "$needs_restart" = "false" ] && [ "${CREDENTIALS_REFRESHED:-}" = "true" ]; then
+        needs_restart=true
+    fi
+
+    # Fallback: check tmux pane for /login indicator
+    if [ "$needs_restart" = "false" ]; then
+        local pane_content
+        pane_content=$(docker exec "$container" tmux capture-pane -t "$session" -p 2>/dev/null) || true
+        if [ -n "$pane_content" ] && [[ "$pane_content" == *"/login"* ]]; then
+            needs_restart=true
+        fi
+    fi
+
+    if [ "$needs_restart" = "false" ]; then
+        return 0
+    fi
+
+    # Auth is stale — kill the tmux session and recreate with --continue
+    warning "OAuth session expired inside container"
+    info "Restarting Claude with fresh credentials..."
+
+    docker exec "$container" tmux kill-session -t "$session" 2>/dev/null || true
+
+    local claude_model="${CLAUDE_MODEL:-claude-opus-4-6}"
+    local session_workdir="$WORKDIR"
+    if [ -n "${YOLO_SESSION_BASE:-}" ]; then
+        local wt_candidate="$YOLO_SESSION_BASE/$(basename "$WORKDIR")"
+        if docker exec "$container" test -d "$wt_candidate" 2>/dev/null; then
+            session_workdir="$wt_candidate"
+        fi
+    fi
+    docker exec "$container" tmux new-session -d -s "$session" -n claude -c "$session_workdir"
+    docker exec "$container" tmux send-keys -t "$session" \
+        "claude --dangerously-skip-permissions --model $claude_model --continue" Enter
+    success "Claude restarted with fresh auth"
 }
 
 # ─── Git Repo Detection ───────────────────────────────────────────────────────
@@ -1079,6 +1200,8 @@ case "$COMMAND" in
         ensure_claude_version "$EXISTING_CONTAINER"
         step "Syncing configuration"
         sync_config_to_container "$EXISTING_CONTAINER"
+        step "Checking auth"
+        check_container_auth "$EXISTING_CONTAINER" "$SESSION_NAME"
         echo ""
         step "Attaching to tmux session"
         attach_to_claude "$EXISTING_CONTAINER" "$SESSION_NAME"
