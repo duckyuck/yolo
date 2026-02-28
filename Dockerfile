@@ -1,12 +1,17 @@
-FROM ubuntu:24.04
+FROM buildpack-deps:noble
 
 ARG HOST_UID=501
 ARG HOST_GID=20
 
-# System packages
+# buildpack-deps:noble provides: git, curl, wget, gcc, g++, make, file,
+# unzip, openssh-client, ca-certificates, tzdata, procps, and dev libraries.
+# Add sysadmin/networking/editor tools it doesn't include:
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git tmux curl ca-certificates jq sudo openssh-client tzdata \
+        tmux jq sudo less vim-tiny man-db \
+        dnsutils iputils-ping net-tools netcat-openbsd \
+        htop tree rsync lsof strace zip \
+        python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI
