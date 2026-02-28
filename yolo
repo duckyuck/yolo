@@ -1403,6 +1403,13 @@ case "$COMMAND" in
         COMPOSE+=(-f "$uf")
     done
 
+    # Check if the container actually exists
+    EXISTING=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true
+    if [ -z "$EXISTING" ]; then
+        error "No running session '$SESSION_NAME' found"
+        exit 1
+    fi
+
     step "Stopping container"
     (
         "${COMPOSE[@]}" down >/dev/null 2>&1
