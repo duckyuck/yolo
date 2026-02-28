@@ -133,6 +133,19 @@ if [ -f /mnt/host-claude.json ]; then
     fi
 fi
 
+# --- User-level CLAUDE.md ---
+# Append Docker environment context so Claude understands its runtime.
+# If the host already had a ~/.claude/CLAUDE.md it was copied above; we append.
+CLAUDE_MD="/home/claude/.claude/CLAUDE.md"
+mkdir -p "$(dirname "$CLAUDE_MD")"
+cat >> "$CLAUDE_MD" << 'CONTAINEREOF'
+
+# Environment: Docker container (yolo)
+
+- Ports you bind are NOT accessible on the host. Bind to 0.0.0.0 and tell the user to add port forwarding in ~/.yolo/compose.override.yml or use network_mode: host.
+- Working directory is a git worktree, not the original repo.
+CONTAINEREOF
+
 # --- Trust dialogs ---
 # Claude Code stores workspace trust in ~/.claude.json under projects["/absolute/path"]
 accept_trust() {
