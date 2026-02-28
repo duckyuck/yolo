@@ -149,8 +149,8 @@ WRAPPER
             chmod +x /tmp/bin/docker
             export PATH="/tmp/bin:$PATH"
 
-            # Run yolo up (non-interactive, non-TTY)
-            output=$(bash ./yolo up e2e-test 2>&1) || {
+            # Run yolo up (non-interactive, non-TTY, worktree mode for git test)
+            output=$(bash ./yolo up e2e-test --worktree 2>&1) || {
                 echo "YOLO_FAILED"
                 echo "$output"
                 exit 1

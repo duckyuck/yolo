@@ -25,11 +25,12 @@ fi
 
 # Parse global flags
 VERBOSE=false
+WORKTREE_MODE=false
 for arg in "$@"; do
-    if [ "$arg" = "--verbose" ] || [ "$arg" = "-v" ]; then
-        VERBOSE=true
-        break
-    fi
+    case "$arg" in
+        --verbose|-v) VERBOSE=true ;;
+        --worktree) WORKTREE_MODE=true ;;
+    esac
 done
 
 if ! docker info >/dev/null 2>&1; then
@@ -853,11 +854,11 @@ attach_to_claude() {
 
 usage() {
     cat <<EOF
-Usage: yolo <command> <session> [options]
+Usage: yolo <command> [session] [options]
 
 Commands:
-  up <session>              Start or reattach to a session (idempotent)
-  down <session>            Stop container, prompt for worktree cleanup
+  up [session]              Start or reattach to a session (idempotent)
+  down [session]            Stop container, prompt for worktree cleanup
   cp <session> <file...>    Copy files into a running session's workdir
   path <session>            Print worktree base path for a session
   path <project>/<session>  Same, but specify project instead of inferring from cwd
@@ -867,16 +868,23 @@ Commands:
   update                    Update yolo to the latest release
 
 Arguments:
-  <session>       Session name (used for branches, container name, tmux session)
+  [session]       Session name (defaults to "default")
                   Example: feat/implement-cool-feature
   <project>       Project directory name (defaults to basename of cwd)
 
 Options:
+  --worktree      Use git worktree isolation (creates a branch per session)
   --port <port>   Expose a container port to the host (repeatable)
                   Examples: --port 3000, --port 3000-9999, --port 3000 --port 8080
   --verbose, -v   Show detailed output (Docker build logs, etc.)
   --version       Print yolo version
   -h, --help      Show this help
+
+Modes:
+  Bind (default)  Mounts the project directory directly into the container.
+                  Multiple sessions share the same files. No git required.
+  Worktree        Creates a git worktree per session for branch isolation.
+                  Requires --worktree flag and a session name.
 
 Auth: auto-extracts OAuth from macOS Keychain, or set ANTHROPIC_API_KEY.
 
@@ -891,8 +899,10 @@ Tmux shortcuts (inside the session):
   Ctrl-B w        List all windows
 
 Examples:
-  yolo up feat/implement-cool-feature
-  yolo down feat/implement-cool-feature
+  yolo up                                   # bind mode, "default" session
+  yolo up my-task                           # bind mode, named session
+  yolo up feat/x --worktree                 # worktree mode, branch isolation
+  yolo down                                 # stop default session
   yolo status
   yolo update
 EOF
@@ -980,6 +990,19 @@ if [ "$COMMAND" = "path" ]; then
         error "No worktrees found for '$PROJECT_BASE/$SAFE_NAME'"
         exit 1
     fi
+    # Verify session has actual worktree subdirectories (not bind mode)
+    HAS_WT=false
+    for d in "$WT_BASE"/*/; do
+        [ -d "$d" ] || continue
+        if [ -d "$d/.git" ] || [ -f "$d/.git" ]; then
+            HAS_WT=true
+            break
+        fi
+    done
+    if [ "$HAS_WT" = "false" ]; then
+        error "Session '$SESSION_NAME' is in bind mode (no worktrees)."
+        exit 1
+    fi
     echo "$WT_BASE"
     exit 0
 fi
@@ -1007,8 +1030,19 @@ if [ "$COMMAND" = "status" ]; then
 
         WT_BASE="$YOLO_HOME/$PROJECT_BASE/$SAFE_NAME"
         if [ -d "$WT_BASE" ]; then
-            echo -e "${BOLD}Worktrees:${RESET}"
-            print_session_worktrees "$WT_BASE" "$SAFE_NAME"
+            # Only show worktrees header if session actually has worktree subdirectories
+            HAS_WT=false
+            for d in "$WT_BASE"/*/; do
+                [ -d "$d" ] || continue
+                if [ -d "$d/.git" ] || [ -f "$d/.git" ]; then
+                    HAS_WT=true
+                    break
+                fi
+            done
+            if [ "$HAS_WT" = "true" ]; then
+                echo -e "${BOLD}Worktrees:${RESET}"
+                print_session_worktrees "$WT_BASE" "$SAFE_NAME"
+            fi
         fi
     else
         # Show all sessions with worktree status
@@ -1028,7 +1062,18 @@ if [ "$COMMAND" = "status" ]; then
                     S_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || S_STATUS="unknown"
                 fi
                 echo -e "\n  ${CYAN}${safe}${RESET}: ${S_STATUS}"
-                print_session_worktrees "$session_dir" "$safe" "  "
+                # Only show worktrees if session has worktree subdirectories
+                HAS_WT=false
+                for d in "$session_dir"/*/; do
+                    [ -d "$d" ] || continue
+                    if [ -d "$d/.git" ] || [ -f "$d/.git" ]; then
+                        HAS_WT=true
+                        break
+                    fi
+                done
+                if [ "$HAS_WT" = "true" ]; then
+                    print_session_worktrees "$session_dir" "$safe" "  "
+                fi
             done
         fi
 
@@ -1117,20 +1162,26 @@ case "$COMMAND" in
         ;;
 esac
 
-# Commands that require a session name
+# Session name: required for worktree mode, defaults to "default" otherwise
 SESSION_NAME="${1:-}"
-if [ -z "$SESSION_NAME" ]; then
-    error "Session name required. Example: yolo $COMMAND feat/implement-cool-feature"
-    exit 1
+if [ -z "$SESSION_NAME" ] || [[ "$SESSION_NAME" == --* ]]; then
+    if [ "$WORKTREE_MODE" = "true" ]; then
+        error "Session name required in worktree mode (becomes the branch name)."
+        exit 1
+    fi
+    # Don't shift — $1 is either empty or a flag, not a session name
+    SESSION_NAME="default"
+else
+    shift
 fi
-shift
 
-# Remove --verbose/-v and extract --port values from remaining args
+# Remove --verbose/-v/--worktree and extract --port values from remaining args
 REMAINING_ARGS=()
 PORTS=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --verbose|-v) ;;
+        --worktree) ;;
         --port)
             shift
             [ $# -gt 0 ] || { error "--port requires a value"; exit 1; }
@@ -1168,42 +1219,46 @@ trap 'rm -rf "$YOLO_TMPDIR"' EXIT
 
 case "$COMMAND" in
   up)
-    # Detect git repos
-    step "Detecting git repos"
-    ensure_git_repos "$PROJECT_DIR"
-
-    for r in "${REPOS[@]}"; do
-        info "Found: $(basename "$r")"
-    done
-
     # Extract GH_TOKEN for container use (if gh is available)
     if [ -z "${GH_TOKEN:-}" ] && command -v gh >/dev/null 2>&1; then
         export GH_TOKEN="$(gh auth token 2>/dev/null || true)"
     fi
 
-    # Create worktrees on host before starting container
-    step "Setting up worktrees"
-    export YOLO_REPOS=$(IFS='|'; echo "${REPOS[*]}")
-    export YOLO_SESSION_BASE="$YOLO_DIR/$SAFE_NAME"
-    mkdir -p "$YOLO_SESSION_BASE"
-    WT_STDERR="$YOLO_TMPDIR/wt-stderr"
-    WORKTREE_PATH=$("$YOLO_LIB/hooks/worktree-create.sh" "$SESSION_NAME" 2>"$WT_STDERR")
-    while IFS= read -r line; do
-        case "$line" in
-            exists:*)  info "Reusing worktree: ${line#exists:}" ;;
-            reused:*)  IFS=: read -r _ repo branch <<< "$line"
-                       info "Existing branch $branch in $repo" ;;
-            created:*) IFS=: read -r _ repo branch <<< "$line"
-                       success "Created worktree: $repo → $branch" ;;
-            error:*)   error "Worktree failed: ${line#error:}" ;;
-            *)         [ -n "$line" ] && echo "$line" >&2 ;;
-        esac
-    done < "$WT_STDERR"
-    export WORKDIR="$WORKTREE_PATH"
-    update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "${REPOS[@]}"
+    if [ "$WORKTREE_MODE" = "true" ]; then
+        # Worktree mode: detect git repos, create worktrees, mount worktree paths
+        step "Detecting git repos"
+        ensure_git_repos "$PROJECT_DIR"
 
-    # Resolve mounts
-    readarray -t MOUNTS < <(resolve_git_mounts "$PROJECT_DIR" "$SAFE_NAME" "${REPOS[@]}")
+        for r in "${REPOS[@]}"; do
+            info "Found: $(basename "$r")"
+        done
+
+        step "Setting up worktrees"
+        export YOLO_REPOS=$(IFS='|'; echo "${REPOS[*]}")
+        export YOLO_SESSION_BASE="$YOLO_DIR/$SAFE_NAME"
+        mkdir -p "$YOLO_SESSION_BASE"
+        WT_STDERR="$YOLO_TMPDIR/wt-stderr"
+        WORKTREE_PATH=$("$YOLO_LIB/hooks/worktree-create.sh" "$SESSION_NAME" 2>"$WT_STDERR")
+        while IFS= read -r line; do
+            case "$line" in
+                exists:*)  info "Reusing worktree: ${line#exists:}" ;;
+                reused:*)  IFS=: read -r _ repo branch <<< "$line"
+                           info "Existing branch $branch in $repo" ;;
+                created:*) IFS=: read -r _ repo branch <<< "$line"
+                           success "Created worktree: $repo → $branch" ;;
+                error:*)   error "Worktree failed: ${line#error:}" ;;
+                *)         [ -n "$line" ] && echo "$line" >&2 ;;
+            esac
+        done < "$WT_STDERR"
+        export WORKDIR="$WORKTREE_PATH"
+        update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "${REPOS[@]}"
+
+        readarray -t MOUNTS < <(resolve_git_mounts "$PROJECT_DIR" "$SAFE_NAME" "${REPOS[@]}")
+    else
+        # Bind mode: mount project directory directly
+        MOUNTS=("$PROJECT_DIR:$PROJECT_DIR")
+        mkdir -p "$YOLO_DIR/$SAFE_NAME"
+    fi
 
     # Persist Claude session data across container recreations
     CLAUDE_PROJECTS_DIR="$YOLO_SESSION_BASE/.claude-projects"
@@ -1361,10 +1416,18 @@ case "$COMMAND" in
     wait $BG_PID
     success "Container stopped"
 
-    # Worktree cleanup
-    readarray -t REPOS < <(detect_git_repos "$PROJECT_DIR")
-    if [ ${#REPOS[@]} -gt 0 ]; then
-        cleanup_worktrees "$SESSION_NAME" "$SAFE_NAME" "${REPOS[@]}"
+    # Worktree cleanup (auto-detect from sessions.json metadata)
+    HAS_WORKTREES=false
+    SESSIONS_JSON="$YOLO_DIR/sessions.json"
+    if [ -f "$SESSIONS_JSON" ] && command -v jq >/dev/null 2>&1 && \
+       jq -e --arg s "$SAFE_NAME" '.[$s] // empty | length > 0' "$SESSIONS_JSON" >/dev/null 2>&1; then
+        HAS_WORKTREES=true
+    fi
+    if [ "$HAS_WORKTREES" = "true" ]; then
+        readarray -t REPOS < <(detect_git_repos "$PROJECT_DIR")
+        if [ ${#REPOS[@]} -gt 0 ]; then
+            cleanup_worktrees "$SESSION_NAME" "$SAFE_NAME" "${REPOS[@]}"
+        fi
     fi
 
     # Clean up temp files

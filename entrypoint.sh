@@ -141,7 +141,6 @@ cat > /home/claude/.claude/rules/yolo-docker.md << 'CONTAINEREOF'
 # Environment: Docker container (yolo)
 
 - Ports you bind are NOT accessible on the host. Bind to 0.0.0.0 and tell the user to add port forwarding in ~/.yolo/compose.override.yml or use network_mode: host.
-- Working directory is a git worktree, not the original repo.
 CONTAINEREOF
 
 # --- Trust dialogs ---

@@ -4,29 +4,37 @@
 
 Claude Code is great, but babysitting it through permission prompts gets old fast. yolo throws Claude into a Docker container with `--dangerously-skip-permissions` so it can actually get work done while you go do something else — like grab coffee, review a PR, or spin up *another* Claude on a different task.
 
-Each session gets its own container, branch, and git worktree — so Claude works on an isolated copy of your code, not your working directory. Got a project with multiple repos? yolo picks them all up and creates a worktree for each one. No repo at all? yolo will `git init` one for you — just point it at an empty directory and go. Run as many sessions as you want in parallel. They can't see each other, they can't mess up your host, and you don't have to sit there approving every `mkdir`.
+Each session gets its own container with your project directory mounted directly — no git required, no ceremony. Run as many sessions as you want in parallel. They can't mess up your host, and you don't have to sit there approving every `mkdir`.
+
+Need branch isolation? Add `--worktree` and each session gets its own git worktree on a dedicated branch. Got a project with multiple repos? yolo picks them all up and creates a worktree for each one.
 
 ```
-+-----------------------------------------------------+
-|  your-project/                                      |
-|                                                     |
-|  yolo up feat/auth        yolo up fix/header-bug    |
-|       |                         |                   |
-|       v                         v                   |
-|  +--------------+      +--------------+             |
-|  | Container    |      | Container    |             |
-|  | branch:      |      | branch:      |             |
-|  | feat/auth    |      | fix/header   |             |
-|  |              |      |              |             |
-|  | Claude Code  |      | Claude Code  |             |
-|  | in tmux      |      | in tmux      |             |
-|  +--------------+      +--------------+             |
-|       |                         |                   |
-|       v                         v                   |
-|  ~/.yolo/project/         ~/.yolo/project/          |
-|    feat-auth/               fix-header-bug/         |
-|    (git worktree)           (git worktree)          |
-+-----------------------------------------------------+
++----------------------------------------------------------+
+|  your-project/                                           |
+|                                                          |
+|  yolo up            yolo up second      (bind mode)      |
+|       |                   |                              |
+|       v                   v                              |
+|  +--------------+   +--------------+                     |
+|  | Container    |   | Container    |   same project dir  |
+|  | "default"    |   | "second"     |   mounted into both |
+|  |              |   |              |                     |
+|  | Claude Code  |   | Claude Code  |                     |
+|  | in tmux      |   | in tmux      |                     |
+|  +--------------+   +--------------+                     |
+|                                                          |
+|  yolo up feat/auth --worktree         (worktree mode)    |
+|       |                                                  |
+|       v                                                  |
+|  +--------------+                                        |
+|  | Container    |   isolated worktree                    |
+|  | branch:      |   on its own branch                    |
+|  | feat/auth    |                                        |
+|  |              |                                        |
+|  | Claude Code  |                                        |
+|  | in tmux      |                                        |
+|  +--------------+                                        |
++----------------------------------------------------------+
 ```
 
 ## Install
@@ -39,14 +47,14 @@ curl -fsSL https://raw.githubusercontent.com/sourcemagnet/yolo/main/install.sh |
 
 - bash 4+ (macOS ships with 3.x — `brew install bash`)
 - [Docker](https://docs.docker.com/get-docker/)
-- git
 - macOS or Linux
+- git (only needed for `--worktree` mode)
 
 ## Quick Start
 
 ```bash
 cd your-project
-yolo up my-feature          # creates branch, worktree, container — drops you into Claude
+yolo up                     # mounts your project, drops you into Claude
 ```
 
 That's it. Claude is now working unsupervised in a container. Go do something else. When you're done:
@@ -55,48 +63,54 @@ That's it. Claude is now working unsupervised in a container. Go do something el
 # Detach first (keeps container running):
 #   Ctrl-B d
 
-yolo down my-feature        # stops container, offers to clean up worktrees
+yolo down                   # stops the container
+```
+
+Want branch isolation? Use worktree mode:
+
+```bash
+yolo up feat/auth --worktree   # creates branch, worktree, container
+yolo down feat/auth            # stops container, offers to clean up worktrees
 ```
 
 ## What Happens When You Run `yolo up`
 
 A lot, actually — but you don't have to think about any of it:
 
-1. Detects all git repos in your project directory (supports multiple repos side-by-side, or initializes one if the directory is empty)
-2. Creates a git worktree on a new branch named after your session
-3. Builds a Docker container with Claude Code, git, tmux, and GitHub CLI
-4. Mounts the worktree, your SSH keys, git config, and Claude config
-5. Starts Claude Code inside tmux with `--dangerously-skip-permissions`
-6. Attaches your terminal to the tmux session
+1. Mounts your project directory into a Docker container (or creates worktrees if you passed `--worktree`)
+2. Builds a container with Claude Code, git, tmux, and GitHub CLI
+3. Forwards your SSH keys, git config, and Claude config
+4. Starts Claude Code inside tmux with `--dangerously-skip-permissions`
+5. Attaches your terminal to the tmux session
 
 Everything is idempotent — running `yolo up` again on the same session just reattaches you. Mash the command as many times as you want.
 
 ## Commands
 
-### `yolo up <name>`
+### `yolo up [name]`
 
 Start a new session or reattach to an existing one.
 
 ```bash
-yolo up feat/add-auth
-yolo up refactor/cleanup
-yolo up bug/fix-login
+yolo up                         # bind mode, "default" session
+yolo up my-task                 # bind mode, named session
+yolo up feat/add-auth --worktree   # worktree mode, branch isolation
 ```
 
-The session name becomes the git branch name and the worktree directory. Forward slashes in the name are converted to dashes for file paths (e.g., `feat/add-auth` → `~/.yolo/project/feat-add-auth/`).
+Without a name, the session is called "default". In bind mode, your project directory is mounted directly. With `--worktree`, the session name becomes the git branch name and the worktree directory.
 
-### `yolo down <name>`
+### `yolo down [name]`
 
 Stop the container and clean up.
 
 ```bash
-yolo down feat/add-auth
+yolo down                 # stop the "default" session
+yolo down feat/add-auth   # stop a named session
 ```
 
 This will:
 - Stop and remove the Docker container
-- Check each worktree for uncommitted changes or unpushed commits
-- Auto-remove clean worktrees, or prompt you for ones with changes
+- For worktree sessions: check each worktree for uncommitted changes or unpushed commits, auto-remove clean worktrees, or prompt you for ones with changes
 - Optionally delete the branch too (answer `b` at the prompt)
 
 ### `yolo cp <name> <file...>`
@@ -111,7 +125,7 @@ Handy for dropping in specs, context files, or anything else Claude should see.
 
 ### `yolo path <name>`
 
-Print the worktree base path for a session.
+Print the worktree base path for a session (worktree mode only).
 
 ```bash
 yolo path feat/add-auth
@@ -127,7 +141,7 @@ yolo status                 # all sessions in the current project
 yolo status feat/add-auth   # one specific session
 ```
 
-Output includes container status (running/stopped) and per-worktree info — how many commits ahead you are, whether there are uncommitted changes, and if the branch has already been merged.
+Output includes container status (running/stopped). For worktree sessions, also shows per-worktree info — how many commits ahead you are, whether there are uncommitted changes, and if the branch has already been merged.
 
 ### `yolo ps`
 
@@ -161,6 +175,8 @@ Print the installed version.
 
 | Option | Description |
 |---|---|
+| `--worktree` | Use git worktree isolation (creates a branch per session) |
+| `--port <port>` | Expose a container port to the host (repeatable) |
 | `--verbose`, `-v` | Show Docker build logs and detailed output |
 | `--version` | Print version |
 | `-h`, `--help` | Show help |
@@ -278,7 +294,7 @@ If you have `gh` installed and authenticated on the host, yolo extracts your Git
 
 ## Multi-Repo Projects
 
-If your project directory contains multiple git repos as immediate subdirectories (a monorepo-adjacent setup), yolo creates a worktree for each one:
+If your project directory contains multiple git repos as immediate subdirectories (a monorepo-adjacent setup), worktree mode creates a worktree for each one:
 
 ```
 my-project/
@@ -288,7 +304,7 @@ my-project/
 ```
 
 ```bash
-yolo up feat/new-api
+yolo up feat/new-api --worktree
 # Creates:
 #   ~/.yolo/my-project/feat-new-api/frontend/  (worktree)
 #   ~/.yolo/my-project/feat-new-api/backend/   (worktree)
@@ -297,16 +313,19 @@ yolo up feat/new-api
 
 Claude's working directory is set to the session base so it can navigate between repos.
 
+In bind mode (the default, without `--worktree`), the whole project directory is mounted as-is — no worktrees, no branches, just your files.
+
 ## Session Lifecycle
 
 Here's the full lifecycle of a session:
 
 ```
-yolo up feat/x
+yolo up [name] [--worktree]
   │
   ├─ Resolve authentication
-  ├─ Detect git repos
-  ├─ Create worktrees + branches (on host)
+  ├─ Mount project directory (bind mode)
+  │   — or —
+  ├─ Detect git repos + create worktrees (--worktree mode)
   ├─ Generate docker-compose override
   ├─ Build & start container
   │    └─ entrypoint.sh:
@@ -320,13 +339,12 @@ yolo up feat/x
        │
   Ctrl-B d  (detach)
        │
-yolo up feat/x   ← reattach anytime
+yolo up [name]   ← reattach anytime
        │
-yolo down feat/x
+yolo down [name]
   │
   ├─ Stop container
-  ├─ Check worktrees for changes
-  └─ Clean up (auto-remove clean ones, prompt for dirty ones)
+  └─ Clean up worktrees if any (auto-remove clean, prompt for dirty)
 ```
 
 ## Data Layout
@@ -351,10 +369,10 @@ your-project/
 ├── compose.override.yml        # global compose override (optional)
 └── <project>/
     ├── compose.override.yml    # per-project compose override (optional)
-    ├── sessions.json           # worktree-to-repo mapping
+    ├── sessions.json           # worktree-to-repo mapping (worktree mode only)
     └── <session>/
         ├── docker-compose.override.yml
-        └── <repo>/             # git worktree
+        └── <repo>/             # git worktree (worktree mode only)
 ```
 
 ## Troubleshooting
@@ -398,7 +416,7 @@ To run from a git clone instead of an installed copy:
 ```bash
 git clone https://github.com/sourcemagnet/yolo.git
 cd yolo
-./yolo up test-session
+./yolo up
 ```
 
 When running from a clone, the script uses co-located support files directly — no install step needed.
