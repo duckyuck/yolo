@@ -494,14 +494,18 @@ generate_compose_override() {
 
 # ─── User Compose Overrides ───────────────────────────────────────────────
 
-# Collect user compose override files (global + per-project).
+# Collect user compose override files (repo-local → global → per-project).
 # Prints existing override file paths, one per line.
-# Usage: collect_user_overrides <yolo_home> <project_base>
+# Usage: collect_user_overrides <yolo_home> <project_base> [<project_dir>]
 collect_user_overrides() {
     local yolo_home="$1"
     local project_base="$2"
+    local project_dir="${3:-}"
     local f
-    for f in "$yolo_home/compose.override.yml" "$yolo_home/$project_base/compose.override.yml"; do
+    for f in \
+        ${project_dir:+"$project_dir/compose.yolo.yml"} \
+        "$yolo_home/compose.override.yml" \
+        "$yolo_home/$project_base/compose.override.yml"; do
         [ -f "$f" ] && echo "$f" || true
     done
 }
@@ -1050,7 +1054,7 @@ case "$COMMAND" in
     COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml" -f "$OVERRIDE_FILE")
 
     # Append user compose overrides (global + per-project)
-    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE")
+    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE" "$PROJECT_DIR")
     for uf in "${USER_OVERRIDES[@]}"; do
         COMPOSE+=(-f "$uf")
     done
@@ -1136,7 +1140,7 @@ case "$COMMAND" in
         COMPOSE+=(-f "$OVERRIDE_FILE")
     fi
     # Append user compose overrides (global + per-project)
-    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE")
+    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE" "$PROJECT_DIR")
     for uf in "${USER_OVERRIDES[@]}"; do
         COMPOSE+=(-f "$uf")
     done
@@ -1175,7 +1179,7 @@ case "$COMMAND" in
         COMPOSE+=(-f "$OVERRIDE_FILE")
     fi
     # Append user compose overrides (global + per-project)
-    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE")
+    readarray -t USER_OVERRIDES < <(collect_user_overrides "$YOLO_HOME" "$PROJECT_BASE" "$PROJECT_DIR")
     for uf in "${USER_OVERRIDES[@]}"; do
         COMPOSE+=(-f "$uf")
     done
