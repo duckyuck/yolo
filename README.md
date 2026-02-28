@@ -240,10 +240,10 @@ Extra mounts are read-only by default. Append `:rw` to mount read-write.
 
 ### Compose Overrides
 
-Need to expose ports, add capabilities, or tweak the container config? Drop a standard Docker Compose override file and yolo picks it up automatically:
+Need to expose ports, add capabilities, or tweak the container config? Drop a compose override file and yolo picks it up automatically:
 
 ```yaml
-# ~/.yolo/my-project/compose.override.yml
+# compose.yolo.yml (in your project root)
 services:
   claude:
     ports:
@@ -251,14 +251,15 @@ services:
       - "8080:8080"
 ```
 
-Two levels are supported — global overrides apply to all projects, per-project overrides apply to one:
+Three levels are supported — repo-local defaults that travel with the project, plus global and per-project overrides in `~/.yolo`:
 
 | File | Scope |
 |---|---|
+| `compose.yolo.yml` | Project repo (commit this — it survives teardowns) |
 | `~/.yolo/compose.override.yml` | All projects |
 | `~/.yolo/<project>/compose.override.yml` | Single project |
 
-Both are merged in order (global first, then per-project) using Docker Compose's native `-f` file merging. Changes to override files trigger container recreation on next `yolo up`.
+All three are merged in order (repo-local first, then global, then per-project) using Docker Compose's native `-f` file merging. Changes to any override file trigger container recreation on next `yolo up`.
 
 ### Environment Variables
 
@@ -331,6 +332,10 @@ yolo down feat/x
 ## Data Layout
 
 ```
+your-project/
+├── compose.yolo.yml            # repo-local compose override (optional, commit this)
+└── ...
+
 ~/.yolo/
 ├── bin/
 │   └── yolo                    # installed executable
