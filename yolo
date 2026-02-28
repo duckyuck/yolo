@@ -610,6 +610,12 @@ generate_compose_override() {
         for mount in "${mounts[@]}"; do
             echo "      - ${mount}"
         done
+        if [ ${#PORTS[@]} -gt 0 ]; then
+            echo "    ports:"
+            for port in "${PORTS[@]}"; do
+                echo "      - \"${port}:${port}\""
+            done
+        fi
     } > "$override_file"
 }
 
@@ -807,6 +813,8 @@ Arguments:
   <project>       Project directory name (defaults to basename of cwd)
 
 Options:
+  --port <port>   Expose a container port to the host (repeatable)
+                  Examples: --port 3000, --port 3000-9999, --port 3000 --port 8080
   --verbose, -v   Show detailed output (Docker build logs, etc.)
   --version       Print yolo version
   -h, --help      Show this help
@@ -1058,10 +1066,20 @@ if [ -z "$SESSION_NAME" ]; then
 fi
 shift
 
-# Remove --verbose/-v from remaining args
+# Remove --verbose/-v and extract --port values from remaining args
 REMAINING_ARGS=()
-for arg in "$@"; do
-    [[ "$arg" == "--verbose" || "$arg" == "-v" ]] || REMAINING_ARGS+=("$arg")
+PORTS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --verbose|-v) ;;
+        --port)
+            shift
+            [ $# -gt 0 ] || { error "--port requires a value"; exit 1; }
+            PORTS+=("$1")
+            ;;
+        *) REMAINING_ARGS+=("$1") ;;
+    esac
+    shift
 done
 
 SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
