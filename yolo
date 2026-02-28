@@ -710,6 +710,7 @@ sync_config_to_container() {
             # Copy non-transient config files (skip large/session-specific dirs)
             rsync -a --delete \
                 --exclude '.credentials.json' \
+                --exclude 'CLAUDE.md' \
                 --exclude 'backups/' \
                 --exclude 'chrome/' \
                 --exclude 'debug/' \
@@ -1291,8 +1292,10 @@ case "$COMMAND" in
         export CLAUDE_CONTINUE=true
     fi
 
-    # Ensure .gitconfig exists (Docker bind-mount creates a directory if file is missing)
+    # Ensure bind-mounted files exist (Docker creates directories if files are missing)
     [ -f "$YOLO_HOST_HOME/.gitconfig" ] || touch "$YOLO_HOST_HOME/.gitconfig" 2>/dev/null || true
+    mkdir -p "$YOLO_HOST_HOME/.claude" 2>/dev/null || true
+    [ -f "$YOLO_HOST_HOME/.claude/CLAUDE.md" ] || touch "$YOLO_HOST_HOME/.claude/CLAUDE.md" 2>/dev/null || true
 
     step "Starting Claude Code container"
     if [ "$VERBOSE" = "true" ]; then

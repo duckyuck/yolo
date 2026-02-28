@@ -98,7 +98,7 @@ fi
 # Excludes projects/ (persisted via bind mount) and .credentials.json (shared bind mount)
 if [ -d /mnt/host-claude ]; then
     mkdir -p /home/claude/.claude
-    tar -C /mnt/host-claude --exclude='./projects' --exclude='./.credentials.json' -cf - . \
+    tar -C /mnt/host-claude --exclude='./projects' --exclude='./.credentials.json' --exclude='./CLAUDE.md' -cf - . \
         | tar -C /home/claude/.claude -xf - 2>/dev/null || true
     # Transform host paths to container paths in the local copy
     if [ -n "${HOST_HOME:-}" ]; then
@@ -133,13 +133,11 @@ if [ -f /mnt/host-claude.json ]; then
     fi
 fi
 
-# --- User-level CLAUDE.md ---
-# Append Docker environment context so Claude understands its runtime.
-# If the host already had a ~/.claude/CLAUDE.md it was copied above; we append.
-CLAUDE_MD="/home/claude/.claude/CLAUDE.md"
-mkdir -p "$(dirname "$CLAUDE_MD")"
-cat >> "$CLAUDE_MD" << 'CONTAINEREOF'
-
+# --- Docker environment rules ---
+# Write Docker context as a Claude Code rules file (separate from user's CLAUDE.md,
+# which is bind-mounted read-write from the host).
+mkdir -p /home/claude/.claude/rules
+cat > /home/claude/.claude/rules/yolo-docker.md << 'CONTAINEREOF'
 # Environment: Docker container (yolo)
 
 - Ports you bind are NOT accessible on the host. Bind to 0.0.0.0 and tell the user to add port forwarding in ~/.yolo/compose.override.yml or use network_mode: host.
