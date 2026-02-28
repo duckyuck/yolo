@@ -137,10 +137,9 @@ transform_paths_for_container() {
 
 extract_keychain_credentials() {
     # Extract OAuth credentials from macOS Keychain (where Claude Code stores them)
-    # and merge with ~/.claude/.credentials.json for bind-mounting into the container.
+    # and write to ~/.claude/.credentials.json for bind-mounting into containers.
     #
     # Compares expiresAt between Keychain and file — keeps whichever is newer.
-    # This prevents overwriting a token the container refreshed during a session.
     # Sets CREDENTIALS_REFRESHED=true if the file was updated with a different token.
     local creds_file="$YOLO_HOST_HOME/.claude/.credentials.json"
     CREDENTIALS_REFRESHED=false
@@ -304,6 +303,65 @@ check_container_auth() {
     docker exec "$container" tmux send-keys -t "$session" \
         "claude --dangerously-skip-permissions --model $claude_model --continue" Enter
     success "Claude restarted with fresh auth"
+}
+
+# ─── Credential Sync Daemon ───────────────────────────────────────────────────
+
+CREDENTIAL_SYNC_PIDFILE="$YOLO_HOME/.credential-sync.pid"
+CREDENTIAL_SYNC_INTERVAL=300  # 5 minutes
+
+start_credential_sync() {
+    # Start a singleton background process that keeps ~/.claude/.credentials.json
+    # fresh from the macOS Keychain. Only one instance runs regardless of how many
+    # yolo sessions are active. Auto-exits when no yolo containers are running.
+
+    # Skip for API key users
+    [ -z "${ANTHROPIC_API_KEY:-}" ] || return 0
+
+    mkdir -p "$YOLO_HOME"
+
+    # Already running?
+    if [ -f "$CREDENTIAL_SYNC_PIDFILE" ]; then
+        local pid
+        pid=$(cat "$CREDENTIAL_SYNC_PIDFILE" 2>/dev/null)
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            return 0
+        fi
+        rm -f "$CREDENTIAL_SYNC_PIDFILE"
+    fi
+
+    (
+        # Detach from parent — survive terminal close
+        trap 'rm -f "$CREDENTIAL_SYNC_PIDFILE"' EXIT
+
+        while true; do
+            sleep "$CREDENTIAL_SYNC_INTERVAL"
+
+            # Exit if no yolo containers are running
+            if ! docker ps --filter "label=com.docker.compose.service=claude" \
+                    --filter "name=yolo-" --format '{{.ID}}' 2>/dev/null | grep -q .; then
+                break
+            fi
+
+            # Refresh token if near expiry (within 10 minutes)
+            local creds_file="$YOLO_HOST_HOME/.claude/.credentials.json"
+            if [ -f "$creds_file" ]; then
+                local expires_at now_ms margin_ms
+                expires_at=$(jq -r '.claudeAiOauth.expiresAt // 0' "$creds_file" 2>/dev/null)
+                now_ms=$(($(date +%s) * 1000))
+                margin_ms=600000  # 10 minutes
+                if [ "$((expires_at - now_ms))" -lt "$margin_ms" ] 2>/dev/null; then
+                    if command -v claude >/dev/null 2>&1; then
+                        claude auth status >/dev/null 2>&1 || true
+                    fi
+                fi
+            fi
+
+            # Mirror Keychain → file
+            extract_keychain_credentials 2>/dev/null || true
+        done
+    ) &
+    echo $! > "$CREDENTIAL_SYNC_PIDFILE"
 }
 
 # ─── Git Repo Detection ───────────────────────────────────────────────────────
@@ -1201,6 +1259,7 @@ case "$COMMAND" in
     # Authenticate
     step "Authenticating"
     require_auth
+    start_credential_sync
 
     # Check if container is already running
     EXISTING_CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true

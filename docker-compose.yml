@@ -35,5 +35,5 @@ services:
       - ${YOLO_HOST_HOME}/.claude:/mnt/host-claude:ro
       - ${YOLO_HOST_HOME}/.claude.json:/mnt/host-claude.json:ro
 
-      # OAuth credentials (read-write so container sees host token refreshes and vice versa)
-      - ${YOLO_HOST_HOME}/.claude/.credentials.json:/home/claude/.claude/.credentials.json
+      # OAuth credentials (read-only — host-side credential sync daemon keeps this fresh)
+      - ${YOLO_HOST_HOME}/.claude/.credentials.json:/home/claude/.claude/.credentials.json:ro
