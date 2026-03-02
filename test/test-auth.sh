@@ -313,6 +313,7 @@ run_auth_check() {
         export CLAUDE_MODEL="claude-opus-4-6"
         export WORKDIR="$WORKDIR"
         export YOLO_SESSION_BASE=""
+        WORKTREE_MODE=false
 
         check_container_auth "$container" "$session"
     )
@@ -336,6 +337,7 @@ mkdir -p "$CREDS_HOME/.claude"
 (
     export ANTHROPIC_API_KEY="sk-test-key"
     CREDENTIALS_REFRESHED=true
+    WORKTREE_MODE=false
 
     eval "$(sed -n '/^is_token_expired()/,/^}/p' "$SCRIPT_DIR/yolo")"
     eval "$(sed -n '/^check_container_auth()/,/^}/p' "$SCRIPT_DIR/yolo")"

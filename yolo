@@ -294,7 +294,7 @@ check_container_auth() {
 
     local claude_model="${CLAUDE_MODEL:-claude-opus-4-6}"
     local session_workdir="$WORKDIR"
-    if [ -n "${YOLO_SESSION_BASE:-}" ]; then
+    if [ "$WORKTREE_MODE" = "true" ] && [ -n "${YOLO_SESSION_BASE:-}" ]; then
         local wt_candidate="$YOLO_SESSION_BASE/$(basename "$WORKDIR")"
         if docker exec "$container" test -d "$wt_candidate" 2>/dev/null; then
             session_workdir="$wt_candidate"
@@ -816,6 +816,7 @@ ensure_claude_version() {
 attach_to_claude() {
     local container="$1"
     local session="$2"
+    local skip_wait="${3:-false}"
 
     # Check if session exists
     if docker exec "$container" tmux has-session -t "$session" 2>/dev/null; then
@@ -823,19 +824,21 @@ attach_to_claude() {
         return
     fi
 
-    # Try waiting briefly (might be starting up)
-    local found=false
-    for i in $(seq 1 30); do
-        if docker exec "$container" tmux has-session -t "$session" 2>/dev/null; then
-            found=true
-            break
-        fi
-        sleep 0.5
-    done
+    # Try waiting briefly (might be starting up from entrypoint)
+    if [ "$skip_wait" != "true" ]; then
+        local found=false
+        for i in $(seq 1 30); do
+            if docker exec "$container" tmux has-session -t "$session" 2>/dev/null; then
+                found=true
+                break
+            fi
+            sleep 0.5
+        done
 
-    if [ "$found" = "true" ]; then
-        docker exec -it "$container" tmux attach -t "$session"
-        return
+        if [ "$found" = "true" ]; then
+            docker exec -it "$container" tmux attach -t "$session"
+            return
+        fi
     fi
 
     # Session doesn't exist — auto-recover
@@ -846,15 +849,32 @@ attach_to_claude() {
     step "Creating new tmux session"
     local claude_model="${CLAUDE_MODEL:-claude-opus-4-6}"
     local session_workdir="$WORKDIR"
-    if [ -n "${YOLO_SESSION_BASE:-}" ]; then
+    if [ "$WORKTREE_MODE" = "true" ] && [ -n "${YOLO_SESSION_BASE:-}" ]; then
         local wt_candidate="$YOLO_SESSION_BASE/$(basename "$WORKDIR")"
         if [ -d "$wt_candidate" ]; then
             session_workdir="$wt_candidate"
         fi
     fi
+    # Migrate conversation data if project key doesn't match the new CWD
+    if [ -n "${CLAUDE_PROJECTS_DIR:-}" ]; then
+        local expected_key
+        expected_key=$(echo "$session_workdir" | tr '/.' '-')
+        if [ ! -d "$CLAUDE_PROJECTS_DIR/$expected_key" ]; then
+            local old_key
+            old_key=$(find "$CLAUDE_PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | xargs -I{} basename {} 2>/dev/null) || true
+            if [ -n "$old_key" ] && [ "$old_key" != "$expected_key" ]; then
+                mv "$CLAUDE_PROJECTS_DIR/$old_key" "$CLAUDE_PROJECTS_DIR/$expected_key"
+            fi
+        fi
+    fi
+
     docker exec "$container" tmux new-session -d -s "$session" -n claude -c "$session_workdir"
+    local claude_cmd="claude --dangerously-skip-permissions --model $claude_model"
+    if docker exec "$container" find /home/claude/.claude/projects -mindepth 1 -type f -print -quit 2>/dev/null | grep -q .; then
+        claude_cmd="$claude_cmd --continue"
+    fi
     docker exec "$container" tmux send-keys -t "$session" \
-        "claude --dangerously-skip-permissions --model $claude_model" Enter
+        "$claude_cmd" Enter
     success "New session created"
     echo ""
     docker exec -it "$container" tmux attach -t "$session"
@@ -1491,7 +1511,7 @@ case "$COMMAND" in
         check_container_auth "$EXISTING_CONTAINER" "$SESSION_NAME"
         echo ""
         step "Attaching to tmux session"
-        attach_to_claude "$EXISTING_CONTAINER" "$SESSION_NAME"
+        attach_to_claude "$EXISTING_CONTAINER" "$SESSION_NAME" true
         exit 0
     fi
 
@@ -1499,6 +1519,18 @@ case "$COMMAND" in
     if [ -n "$EXISTING_CONTAINER" ]; then
         info "Config changed, recreating container..."
         export CLAUDE_CONTINUE=true
+    fi
+
+    # Migrate conversation data when WORKDIR changes (e.g. worktree→bind mode switch).
+    # Claude Code keys conversations by CWD (encoding: tr '/.' '-'), so a mode change
+    # makes old conversations invisible. Rename the old key directory to match new WORKDIR.
+    EXPECTED_PROJECT_KEY=$(echo "$WORKDIR" | tr '/.' '-')
+    if [ ! -d "$CLAUDE_PROJECTS_DIR/$EXPECTED_PROJECT_KEY" ]; then
+        OLD_KEY=$(find "$CLAUDE_PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | xargs -I{} basename {} 2>/dev/null) || true
+        if [ -n "$OLD_KEY" ] && [ "$OLD_KEY" != "$EXPECTED_PROJECT_KEY" ]; then
+            mv "$CLAUDE_PROJECTS_DIR/$OLD_KEY" "$CLAUDE_PROJECTS_DIR/$EXPECTED_PROJECT_KEY"
+            info "Migrated conversation data to new working directory"
+        fi
     fi
 
     # Ensure bind-mounted files exist (Docker creates directories if files are missing)

@@ -381,6 +381,85 @@ else
     fail "Mode mismatch: should trigger worktree setup — got:\n$(echo "$MISMATCH_OUTPUT" | tail -15)"
 fi
 
+# ─── Test: conversation data migrated when WORKDIR changes ──────────────────
+
+MIGRATE_OUTPUT=$(
+    docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$E2E_SRC:/opt/yolo-src:ro" \
+        -v "$E2E_YOLO_HOME:$E2E_YOLO_HOME" \
+        -e YOLO_HOST_HOME="$HOME" \
+        -e YOLO_HOME="$E2E_YOLO_HOME" \
+        -e ANTHROPIC_API_KEY="sk-test-fake" \
+        --entrypoint /bin/bash \
+        "$TEST_IMAGE" \
+        -c '
+            set -e
+
+            PROJ=$(mktemp -d)
+            cd "$PROJ"
+            PROJ_BASE=$(basename "$PROJ")
+
+            cp /opt/yolo-src/yolo .
+            cp /opt/yolo-src/docker-compose.yml .
+            cp /opt/yolo-src/Dockerfile .
+            cp /opt/yolo-src/entrypoint.sh .
+            cp /opt/yolo-src/tmux.conf .
+            cp -r /opt/yolo-src/hooks .
+
+            # Pre-populate .claude-projects with an old worktree-style key
+            OLD_KEY=$(echo "$HOME/.yolo/$PROJ_BASE/migrate-test/$PROJ_BASE" | tr "/." "-")
+            NEW_KEY=$(echo "$PROJ" | tr "/." "-")
+            PROJECTS_DIR="'"$E2E_YOLO_HOME"'/$PROJ_BASE/migrate-test/.claude-projects"
+            mkdir -p "$PROJECTS_DIR/$OLD_KEY"
+            echo "conversation-data" > "$PROJECTS_DIR/$OLD_KEY/test-convo.jsonl"
+
+            mkdir -p /tmp/bin
+            cat > /tmp/bin/docker <<'"'"'WRAPPER'"'"'
+#!/bin/bash
+if [ "$1" = "compose" ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            up)   exit 0 ;;
+            ps)   echo "fake-container-id"; exit 0 ;;
+        esac
+    done
+fi
+case "$1" in
+    exec)    exit 0 ;;
+    inspect) echo "running"; exit 0 ;;
+esac
+exec /usr/bin/docker "$@"
+WRAPPER
+            chmod +x /tmp/bin/docker
+            export PATH="/tmp/bin:$PATH"
+
+            output=$(bash ./yolo up migrate-test 2>&1) || true
+            echo "$output"
+
+            # Check: old key should be gone, new key should exist with the data
+            if [ -d "$PROJECTS_DIR/$NEW_KEY" ] && [ -f "$PROJECTS_DIR/$NEW_KEY/test-convo.jsonl" ]; then
+                echo "MIGRATION_OK"
+            else
+                echo "MIGRATION_FAILED"
+                echo "Expected key: $NEW_KEY"
+                ls -la "$PROJECTS_DIR/" 2>&1 || true
+            fi
+        '
+) 2>&1
+
+if [[ "$MIGRATE_OUTPUT" == *"Migrated conversation data"* ]]; then
+    pass "Conversation data migration message shown"
+else
+    fail "Should show migration message — got:\n$(echo "$MIGRATE_OUTPUT" | tail -10)"
+fi
+
+if [[ "$MIGRATE_OUTPUT" == *"MIGRATION_OK"* ]]; then
+    pass "Conversation data migrated to new project key"
+else
+    fail "Conversation data should be migrated — got:\n$(echo "$MIGRATE_OUTPUT" | tail -10)"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""
