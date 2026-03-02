@@ -1020,16 +1020,15 @@ if [ "$COMMAND" = "cleanup" ]; then
             C_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || C_STATUS="unknown"
             [ "$C_STATUS" = "running" ] || continue
 
-            # Check tmux attachment
-            ATTACHED="detached"
+            # Skip attached sessions — only prompt for detached ones
             CLIENT_COUNT=$(docker exec "$CID" tmux list-clients 2>/dev/null | wc -l) || CLIENT_COUNT=0
             if [ "$CLIENT_COUNT" -gt 0 ]; then
-                ATTACHED="attached"
+                continue
             fi
 
             FOUND_RUNNING=true
             echo ""
-            echo -e "${BOLD}${PROJECT}/${safe}${RESET}: running (${ATTACHED})"
+            echo -e "${BOLD}${PROJECT}/${safe}${RESET}: running (detached)"
 
             # Show worktree status if applicable
             local_sessions_json="$project_dir/sessions.json"
@@ -1111,7 +1110,7 @@ if [ "$COMMAND" = "cleanup" ]; then
     done
 
     if [ "$FOUND_RUNNING" = "false" ]; then
-        info "No running sessions found"
+        info "No detached sessions found"
     fi
     exit 0
 fi
