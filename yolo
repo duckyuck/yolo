@@ -496,6 +496,16 @@ print_session_worktrees() {
     done
 }
 
+# Extract source repo paths from sessions.json for a given session.
+# Usage: repos_from_sessions_json <sessions_json> <safe_name>
+repos_from_sessions_json() {
+    local sessions_json="$1"
+    local safe_name="$2"
+    [ -f "$sessions_json" ] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    jq -r --arg s "$safe_name" '(.[$s] // {}) | to_entries[] | .value.source // empty' "$sessions_json"
+}
+
 # Record worktree-to-source-repo mapping in sessions.json.
 # Usage: update_sessions_json <yolo_dir> <safe_name> <repo_path>...
 update_sessions_json() {
@@ -864,6 +874,7 @@ Commands:
   path <project>/<session>  Same, but specify project instead of inferring from cwd
   status [session]          Show container status and worktree info
   ps                        Show all sessions across all projects
+  cleanup                   Interactively stop detached sessions
   version                   Print yolo version
   update                    Update yolo to the latest release
 
@@ -894,6 +905,7 @@ Config management:
 
 Tmux shortcuts (inside the session):
   Ctrl-B d        Detach (container keeps running)
+  Ctrl-B Shift-Q  Stop container (kills session)
   Ctrl-B Shift-N  New Claude window
   Ctrl-B n/p      Next/previous window
   Ctrl-B w        List all windows
@@ -963,6 +975,123 @@ if [ "$COMMAND" = "ps" ]; then
 
     if [ "$FOUND_ANY" = "false" ]; then
         info "No sessions found"
+    fi
+    exit 0
+fi
+
+if [ "$COMMAND" = "cleanup" ]; then
+    YOLO_BASE="$YOLO_HOME"
+    FOUND_RUNNING=false
+
+    for project_dir in "$YOLO_BASE"/*/; do
+        [ -d "$project_dir" ] || continue
+        PROJECT=$(basename "$project_dir")
+        # Skip non-project directories
+        [[ "$PROJECT" == "bin" || "$PROJECT" == "lib" ]] && continue
+
+        for session_dir in "$project_dir"*/; do
+            [ -d "$session_dir" ] || continue
+            safe=$(basename "$session_dir")
+
+            PREFIX="yolo-${PROJECT}-${safe}"
+            CID=$(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml" ps -q claude 2>/dev/null) || true
+            [ -n "$CID" ] || continue
+
+            C_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || C_STATUS="unknown"
+            [ "$C_STATUS" = "running" ] || continue
+
+            # Check tmux attachment
+            ATTACHED="detached"
+            CLIENT_COUNT=$(docker exec "$CID" tmux list-clients 2>/dev/null | wc -l) || CLIENT_COUNT=0
+            if [ "$CLIENT_COUNT" -gt 0 ]; then
+                ATTACHED="attached"
+            fi
+
+            FOUND_RUNNING=true
+            echo ""
+            echo -e "${BOLD}${PROJECT}/${safe}${RESET}: running (${ATTACHED})"
+
+            # Show worktree status if applicable
+            local_sessions_json="$project_dir/sessions.json"
+            IS_WORKTREE=false
+            if [ -f "$local_sessions_json" ] && command -v jq >/dev/null 2>&1 && \
+               jq -e --arg s "$safe" '.[$s] // empty | length > 0' "$local_sessions_json" >/dev/null 2>&1; then
+                IS_WORKTREE=true
+                wt_base="$project_dir$safe"
+                print_session_worktrees "$wt_base" "$safe" "  "
+            fi
+
+            # Prompt for action
+            if [ "$IS_WORKTREE" = "true" ]; then
+                echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op / stop+[${BOLD}c${RESET}]lean / stop+clean+[${BOLD}b${RESET}]ranches: "
+            else
+                echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op: "
+            fi
+            read -r choice
+
+            case "${choice:-s}" in
+                t|T)
+                    COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+                    OVERRIDE="$session_dir/docker-compose.override.yml"
+                    [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
+                    "${COMPOSE[@]}" down >/dev/null 2>&1
+                    success "Stopped ${PROJECT}/${safe}"
+                    ;;
+                c|C)
+                    if [ "$IS_WORKTREE" = "false" ]; then
+                        warn "Not a worktree session — stopping only"
+                    fi
+                    COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+                    OVERRIDE="$session_dir/docker-compose.override.yml"
+                    [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
+                    "${COMPOSE[@]}" down >/dev/null 2>&1
+                    if [ "$IS_WORKTREE" = "true" ]; then
+                        # Resolve repos from sessions.json and remove worktrees
+                        readarray -t REPOS < <(repos_from_sessions_json "$local_sessions_json" "$safe")
+                        if [ ${#REPOS[@]} -gt 0 ]; then
+                            # Resolve session name from worktree HEAD
+                            first_wt="$project_dir$safe/${REPOS[0]##*/}"
+                            if [ -d "$first_wt" ]; then
+                                session_name=$(git -C "$first_wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || session_name="$safe"
+                            else
+                                session_name="$safe"
+                            fi
+                            YOLO_DIR="${project_dir%/}" remove_worktrees "$session_name" "$safe" false "${REPOS[@]}"
+                        fi
+                    fi
+                    success "Stopped and cleaned ${PROJECT}/${safe}"
+                    ;;
+                b|B)
+                    if [ "$IS_WORKTREE" = "false" ]; then
+                        warn "Not a worktree session — stopping only"
+                    fi
+                    COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+                    OVERRIDE="$session_dir/docker-compose.override.yml"
+                    [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
+                    "${COMPOSE[@]}" down >/dev/null 2>&1
+                    if [ "$IS_WORKTREE" = "true" ]; then
+                        readarray -t REPOS < <(repos_from_sessions_json "$local_sessions_json" "$safe")
+                        if [ ${#REPOS[@]} -gt 0 ]; then
+                            first_wt="$project_dir$safe/${REPOS[0]##*/}"
+                            if [ -d "$first_wt" ]; then
+                                session_name=$(git -C "$first_wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || session_name="$safe"
+                            else
+                                session_name="$safe"
+                            fi
+                            YOLO_DIR="${project_dir%/}" remove_worktrees "$session_name" "$safe" true "${REPOS[@]}"
+                        fi
+                    fi
+                    success "Stopped, cleaned, and deleted branches for ${PROJECT}/${safe}"
+                    ;;
+                *)
+                    info "Skipped ${PROJECT}/${safe}"
+                    ;;
+            esac
+        done
+    done
+
+    if [ "$FOUND_RUNNING" = "false" ]; then
+        info "No running sessions found"
     fi
     exit 0
 fi
@@ -1153,7 +1282,7 @@ fi
 
 # Validate command before checking session name
 case "$COMMAND" in
-    up|down|auth|cp|path|status|ps|version|update) ;;
+    up|down|auth|cp|path|status|ps|cleanup|version|update) ;;
     *)
         error "Unknown command: $COMMAND"
         echo ""
