@@ -159,6 +159,16 @@ another-project
   refactor-cleanup: running
 ```
 
+### `yolo cleanup`
+
+Interactively iterate all running sessions and stop/clean them. Works from any directory.
+
+```bash
+yolo cleanup
+```
+
+For each running session, shows its status (attached/detached) and worktree info, then lets you skip, stop, or stop and clean up worktrees.
+
 ### `yolo update`
 
 Update to the latest release.
@@ -205,6 +215,7 @@ Each session runs inside [tmux](https://github.com/tmux/tmux). Here are the key 
 | Shortcut | Action |
 |---|---|
 | `Ctrl-B d` | **Detach** — exit without stopping the container |
+| `Ctrl-B Shift-Q` | **Stop** — kills session and stops the container |
 | `Ctrl-B Shift-N` | Open a **new Claude window** (runs another Claude instance) |
 | `Ctrl-B n` | Next window |
 | `Ctrl-B p` | Previous window |
