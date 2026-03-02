@@ -309,6 +309,78 @@ else
     fail "Compose override should exist in bind mode — got:\n$MOUNT_OUTPUT"
 fi
 
+# ─── Test: mode mismatch detection (worktree → bind) ─────────────────────────
+
+MISMATCH_OUTPUT=$(
+    docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$E2E_SRC:/opt/yolo-src:ro" \
+        -v "$E2E_YOLO_HOME:$E2E_YOLO_HOME" \
+        -e YOLO_HOST_HOME="$HOME" \
+        -e YOLO_HOME="$E2E_YOLO_HOME" \
+        -e ANTHROPIC_API_KEY="sk-test-fake" \
+        --entrypoint /bin/bash \
+        "$TEST_IMAGE" \
+        -c '
+            set -e
+
+            PROJ=$(mktemp -d)
+            cd "$PROJ"
+            git init -q
+            git config user.email "test@test.com"
+            git config user.name "Test"
+            git commit --allow-empty -m "init" -q
+
+            cp /opt/yolo-src/yolo .
+            cp /opt/yolo-src/docker-compose.yml .
+            cp /opt/yolo-src/Dockerfile .
+            cp /opt/yolo-src/entrypoint.sh .
+            cp /opt/yolo-src/tmux.conf .
+            cp -r /opt/yolo-src/hooks .
+
+            mkdir -p /tmp/bin
+            cat > /tmp/bin/docker <<'"'"'WRAPPER'"'"'
+#!/bin/bash
+if [ "$1" = "compose" ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            up)   echo "COMPOSE_UP_INTERCEPTED" >> /tmp/compose-calls.log; exit 0 ;;
+            ps)   echo "fake-container-id"; exit 0 ;;
+        esac
+    done
+fi
+case "$1" in
+    exec)    exit 0 ;;
+    inspect) echo "running"; exit 0 ;;
+esac
+exec /usr/bin/docker "$@"
+WRAPPER
+            chmod +x /tmp/bin/docker
+            export PATH="/tmp/bin:$PATH"
+
+            # First run: worktree mode — creates .mode file
+            output1=$(bash ./yolo up mismatch-test --worktree 2>&1) || true
+
+            # Second run: bind mode (no --worktree), non-interactive
+            output2=$(bash ./yolo up mismatch-test 2>&1) || true
+
+            echo "$output2"
+            echo "MISMATCH_DONE"
+        '
+) 2>&1
+
+if [[ "$MISMATCH_OUTPUT" == *"Keeping worktree mode"* ]]; then
+    pass "Mode mismatch detected and kept original mode (non-interactive)"
+else
+    fail "Mode mismatch should auto-keep worktree mode — got:\n$(echo "$MISMATCH_OUTPUT" | tail -15)"
+fi
+
+if [[ "$MISMATCH_OUTPUT" == *"Setting up worktrees"* ]]; then
+    pass "Mode mismatch: still triggers worktree setup after auto-keep"
+else
+    fail "Mode mismatch: should trigger worktree setup — got:\n$(echo "$MISMATCH_OUTPUT" | tail -15)"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""

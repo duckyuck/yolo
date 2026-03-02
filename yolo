@@ -1224,6 +1224,28 @@ case "$COMMAND" in
         export GH_TOKEN="$(gh auth token 2>/dev/null || true)"
     fi
 
+    # Detect mode mismatch with existing session
+    MODE_FILE="$YOLO_SESSION_BASE/.mode"
+    if [ -f "$MODE_FILE" ]; then
+        PREV_MODE=$(cat "$MODE_FILE")
+        if [ "$WORKTREE_MODE" = "true" ]; then CURR_MODE="worktree"; else CURR_MODE="bind"; fi
+        if [ "$PREV_MODE" != "$CURR_MODE" ]; then
+            echo ""
+            info "Session '$SESSION_NAME' was created in $PREV_MODE mode (now: $CURR_MODE)"
+            info "Switching modes changes the working directory, which breaks conversation history."
+            if [ -t 1 ]; then
+                echo -ne "  Keep $PREV_MODE mode? [${BOLD}Y${RESET}/n] "
+                read -r answer
+                if [[ ! "$answer" =~ ^[Nn] ]]; then
+                    if [ "$PREV_MODE" = "worktree" ]; then WORKTREE_MODE=true; else WORKTREE_MODE=false; fi
+                fi
+            else
+                info "Keeping $PREV_MODE mode (non-interactive)"
+                if [ "$PREV_MODE" = "worktree" ]; then WORKTREE_MODE=true; else WORKTREE_MODE=false; fi
+            fi
+        fi
+    fi
+
     if [ "$WORKTREE_MODE" = "true" ]; then
         # Worktree mode: detect git repos, create worktrees, mount worktree paths
         step "Detecting git repos"
@@ -1259,6 +1281,9 @@ case "$COMMAND" in
         MOUNTS=("$PROJECT_DIR:$PROJECT_DIR")
         mkdir -p "$YOLO_DIR/$SAFE_NAME"
     fi
+
+    # Record session mode for mismatch detection on next launch
+    if [ "$WORKTREE_MODE" = "true" ]; then echo "worktree"; else echo "bind"; fi > "$YOLO_SESSION_BASE/.mode"
 
     # Persist Claude session data across container recreations
     CLAUDE_PROJECTS_DIR="$YOLO_SESSION_BASE/.claude-projects"
