@@ -95,6 +95,13 @@ CLAUDEJSON
 # Fake credentials file (mounted read-write in real usage)
 echo '{}' > "$MOCK_CLAUDE/.credentials.json"
 
+# Skill directory with a symlinked skill (simulates ~/.claude/skills/agent-browser -> external path)
+mkdir -p "$MOCK_CLAUDE/skills/real-skill"
+echo "name: real-skill" > "$MOCK_CLAUDE/skills/real-skill/SKILL.md"
+mkdir -p "$TMPDIR/external-skills/agent-browser"
+echo "name: agent-browser" > "$TMPDIR/external-skills/agent-browser/SKILL.md"
+ln -s "$TMPDIR/external-skills/agent-browser" "$MOCK_CLAUDE/skills/agent-browser"
+
 # ─── Start container with real entrypoint ─────────────────────────────────────
 
 CONTAINER=$(docker run -d \
@@ -205,6 +212,25 @@ if [[ "$SETTINGS" == *"$MOCK_HOME"* ]]; then
     fail "Config should not contain host paths"
 else
     pass "Host paths removed from config"
+fi
+
+# ─── Skills ──────────────────────────────────────────────────────────────────
+
+echo -e "\n${BOLD}Skills${RESET}"
+
+# Real skill directory should be copied
+if docker exec "$CONTAINER" test -f /home/claude/.claude/skills/real-skill/SKILL.md 2>/dev/null; then
+    pass "Real skill directory copied"
+else
+    fail "Real skill directory should be copied"
+fi
+
+# Symlinked skill is a broken symlink after entrypoint (target is a host path)
+LINK_TARGET=$(docker exec "$CONTAINER" readlink /home/claude/.claude/skills/agent-browser 2>/dev/null) || true
+if [ -n "$LINK_TARGET" ]; then
+    pass "Symlinked skill preserved as symlink by entrypoint (will be fixed by sync)"
+else
+    fail "Symlinked skill should exist as a symlink after entrypoint"
 fi
 
 # ─── .claude.json ─────────────────────────────────────────────────────────────
