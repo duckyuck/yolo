@@ -233,6 +233,27 @@ else
     fail "Symlinked skill should exist as a symlink after entrypoint"
 fi
 
+# Simulate sync_config_to_container's symlink resolution step
+TEMP_SKILLS="$TMPDIR/skills-resolved"
+rm -rf "$TEMP_SKILLS"
+cp -rL "$MOCK_CLAUDE/skills" "$TEMP_SKILLS" 2>/dev/null || true
+docker cp "$TEMP_SKILLS/." "$CONTAINER:/home/claude/.claude/skills/" >/dev/null 2>&1
+rm -rf "$TEMP_SKILLS"
+
+# After sync: symlinked skill should now be a real directory with content
+if docker exec "$CONTAINER" test -f /home/claude/.claude/skills/agent-browser/SKILL.md 2>/dev/null; then
+    pass "Symlinked skill resolved to real directory after sync"
+else
+    fail "Symlinked skill should be resolved to real directory after sync"
+fi
+
+# Real skill should still be intact
+if docker exec "$CONTAINER" test -f /home/claude/.claude/skills/real-skill/SKILL.md 2>/dev/null; then
+    pass "Real skill still intact after sync"
+else
+    fail "Real skill should survive sync"
+fi
+
 # ─── .claude.json ─────────────────────────────────────────────────────────────
 
 echo -e "\n${BOLD}.claude.json${RESET}"

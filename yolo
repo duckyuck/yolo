@@ -755,6 +755,16 @@ sync_config_to_container() {
         else
             success "~/.claude/ synced"
         fi
+
+        # Resolve symlinked skills (symlinks to host paths break inside the container)
+        if [ -d "$HOME/.claude/skills" ] \
+            && find "$HOME/.claude/skills" -maxdepth 1 -type l -print -quit | grep -q .; then
+            local temp_skills="/tmp/yolo-${SAFE_NAME}-skills-resolved"
+            rm -rf "$temp_skills"
+            cp -rL "$HOME/.claude/skills" "$temp_skills" 2>/dev/null || true
+            docker cp "$temp_skills/." "$container:/home/claude/.claude/skills/" >/dev/null 2>&1
+            rm -rf "$temp_skills"
+        fi
     fi
 
     # Sync ~/.claude.json
