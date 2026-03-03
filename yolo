@@ -907,7 +907,7 @@ Commands:
   path <project>/<session>  Same, but specify project instead of inferring from cwd
   status [session]          Show container status and worktree info
   ps                        Show all sessions across all projects
-  cleanup                   Interactively stop detached sessions
+  cleanup                   Interactively clean up all sessions
   version                   Print yolo version
   update                    Update yolo to the latest release
 
@@ -1002,7 +1002,10 @@ if [ "$COMMAND" = "ps" ]; then
             if [ -n "$CID" ]; then
                 S_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || S_STATUS="unknown"
             fi
-            echo -e "  ${CYAN}${safe}${RESET}: ${S_STATUS}"
+            MODE_FILE="$project_dir/$safe/.mode"
+            MODE=""
+            [ -f "$MODE_FILE" ] && MODE=" ($(cat "$MODE_FILE"))"
+            echo -e "  ${CYAN}${safe}${RESET}: ${S_STATUS}${DIM}${MODE}${RESET}"
         done
     done
 
@@ -1014,7 +1017,7 @@ fi
 
 if [ "$COMMAND" = "cleanup" ]; then
     YOLO_BASE="$YOLO_HOME"
-    FOUND_RUNNING=false
+    FOUND_ANY=false
 
     for project_dir in "$YOLO_BASE"/*/; do
         [ -d "$project_dir" ] || continue
@@ -1028,22 +1031,35 @@ if [ "$COMMAND" = "cleanup" ]; then
 
             PREFIX="yolo-${PROJECT}-${safe}"
             CID=$(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml" ps -q claude 2>/dev/null) || true
-            [ -n "$CID" ] || continue
 
-            C_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || C_STATUS="unknown"
-            [ "$C_STATUS" = "running" ] || continue
-
-            # Skip attached sessions — only prompt for detached ones
-            CLIENT_COUNT=$(docker exec "$CID" tmux list-clients 2>/dev/null | wc -l) || CLIENT_COUNT=0
-            if [ "$CLIENT_COUNT" -gt 0 ]; then
-                continue
+            C_STATUS="none"
+            if [ -n "$CID" ]; then
+                C_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || C_STATUS="unknown"
             fi
 
-            FOUND_RUNNING=true
-            echo ""
-            echo -e "${BOLD}${PROJECT}/${safe}${RESET}: running (detached)"
+            # Skip attached sessions — user is actively using them
+            if [ "$C_STATUS" = "running" ]; then
+                CLIENT_COUNT=$(docker exec "$CID" tmux list-clients 2>/dev/null | wc -l) || CLIENT_COUNT=0
+                if [ "$CLIENT_COUNT" -gt 0 ]; then
+                    continue
+                fi
+            fi
 
-            # Show worktree status if applicable
+            FOUND_ANY=true
+
+            # Determine display status
+            if [ "$C_STATUS" = "running" ]; then
+                STATUS_LABEL="running (detached)"
+            elif [ "$C_STATUS" = "none" ]; then
+                STATUS_LABEL="stopped (no container)"
+            else
+                STATUS_LABEL="stopped"
+            fi
+
+            echo ""
+            echo -e "${BOLD}${PROJECT}/${safe}${RESET}: ${STATUS_LABEL}"
+
+            # Check for worktree metadata
             local_sessions_json="$project_dir/sessions.json"
             IS_WORKTREE=false
             if [ -f "$local_sessions_json" ] && command -v jq >/dev/null 2>&1 && \
@@ -1053,35 +1069,44 @@ if [ "$COMMAND" = "cleanup" ]; then
                 print_session_worktrees "$wt_base" "$safe" "  "
             fi
 
-            # Prompt for action
-            if [ "$IS_WORKTREE" = "true" ]; then
+            # Build prompt based on session state
+            IS_RUNNING=false
+            [ "$C_STATUS" = "running" ] && IS_RUNNING=true
+
+            if [ "$IS_RUNNING" = "true" ] && [ "$IS_WORKTREE" = "true" ]; then
                 echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op / stop+[${BOLD}c${RESET}]lean / stop+clean+[${BOLD}b${RESET}]ranches: "
-            else
+            elif [ "$IS_RUNNING" = "true" ]; then
                 echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op: "
+            elif [ "$IS_WORKTREE" = "true" ]; then
+                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}c${RESET}]lean / clean+[${BOLD}b${RESET}]ranches: "
+            else
+                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}c${RESET}]lean: "
             fi
             read -r choice
 
             case "${choice:-s}" in
                 t|T)
-                    COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
-                    OVERRIDE="$session_dir/docker-compose.override.yml"
-                    [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
-                    "${COMPOSE[@]}" down >/dev/null 2>&1
-                    success "Stopped ${PROJECT}/${safe}"
+                    if [ "$IS_RUNNING" = "false" ]; then
+                        warn "Session not running — nothing to stop"
+                    else
+                        COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+                        OVERRIDE="$session_dir/docker-compose.override.yml"
+                        [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
+                        "${COMPOSE[@]}" down >/dev/null 2>&1
+                        success "Stopped ${PROJECT}/${safe}"
+                    fi
                     ;;
                 c|C)
-                    if [ "$IS_WORKTREE" = "false" ]; then
-                        warn "Not a worktree session — stopping only"
-                    fi
+                    # Stop container if running
                     COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
                     OVERRIDE="$session_dir/docker-compose.override.yml"
                     [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
                     "${COMPOSE[@]}" down >/dev/null 2>&1
+
+                    # Remove worktrees if applicable
                     if [ "$IS_WORKTREE" = "true" ]; then
-                        # Resolve repos from sessions.json and remove worktrees
                         readarray -t REPOS < <(repos_from_sessions_json "$local_sessions_json" "$safe")
                         if [ ${#REPOS[@]} -gt 0 ]; then
-                            # Resolve session name from worktree HEAD
                             first_wt="$project_dir$safe/${REPOS[0]##*/}"
                             if [ -d "$first_wt" ]; then
                                 session_name=$(git -C "$first_wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || session_name="$safe"
@@ -1090,17 +1115,25 @@ if [ "$COMMAND" = "cleanup" ]; then
                             fi
                             YOLO_DIR="${project_dir%/}" remove_worktrees "$session_name" "$safe" false "${REPOS[@]}"
                         fi
+                    else
+                        # No worktrees — just remove the session directory
+                        rm -rf "$session_dir"
+                        rmdir "$project_dir" 2>/dev/null || true
                     fi
-                    success "Stopped and cleaned ${PROJECT}/${safe}"
+                    success "Cleaned ${PROJECT}/${safe}"
                     ;;
                 b|B)
                     if [ "$IS_WORKTREE" = "false" ]; then
-                        warn "Not a worktree session — stopping only"
+                        warn "Not a worktree session"
                     fi
+
+                    # Stop container if running
                     COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
                     OVERRIDE="$session_dir/docker-compose.override.yml"
                     [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
                     "${COMPOSE[@]}" down >/dev/null 2>&1
+
+                    # Remove worktrees and branches
                     if [ "$IS_WORKTREE" = "true" ]; then
                         readarray -t REPOS < <(repos_from_sessions_json "$local_sessions_json" "$safe")
                         if [ ${#REPOS[@]} -gt 0 ]; then
@@ -1112,8 +1145,11 @@ if [ "$COMMAND" = "cleanup" ]; then
                             fi
                             YOLO_DIR="${project_dir%/}" remove_worktrees "$session_name" "$safe" true "${REPOS[@]}"
                         fi
+                    else
+                        rm -rf "$session_dir"
+                        rmdir "$project_dir" 2>/dev/null || true
                     fi
-                    success "Stopped, cleaned, and deleted branches for ${PROJECT}/${safe}"
+                    success "Cleaned and deleted branches for ${PROJECT}/${safe}"
                     ;;
                 *)
                     info "Skipped ${PROJECT}/${safe}"
@@ -1122,8 +1158,8 @@ if [ "$COMMAND" = "cleanup" ]; then
         done
     done
 
-    if [ "$FOUND_RUNNING" = "false" ]; then
-        info "No detached sessions found"
+    if [ "$FOUND_ANY" = "false" ]; then
+        info "No sessions to clean up"
     fi
     exit 0
 fi
@@ -1180,12 +1216,16 @@ if [ "$COMMAND" = "status" ]; then
         COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml")
 
         CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true
+        MODE_FILE="$YOLO_HOME/$PROJECT_BASE/$SAFE_NAME/.mode"
+        MODE=""
+        [ -f "$MODE_FILE" ] && MODE=" ($(cat "$MODE_FILE"))"
+
         if [ -n "$CONTAINER" ]; then
             STATUS_VAL=$(docker inspect --format '{{.State.Status}}' "$CONTAINER" 2>/dev/null) || STATUS_VAL="unknown"
-            echo -e "${BOLD}Session:${RESET} $SESSION_NAME"
+            echo -e "${BOLD}Session:${RESET} $SESSION_NAME${DIM}${MODE}${RESET}"
             echo -e "${BOLD}Container:${RESET} $CONTAINER_PREFIX (${STATUS_VAL})"
         else
-            echo -e "${BOLD}Session:${RESET} $SESSION_NAME"
+            echo -e "${BOLD}Session:${RESET} $SESSION_NAME${DIM}${MODE}${RESET}"
             echo -e "${BOLD}Container:${RESET} not running"
         fi
 
@@ -1222,7 +1262,10 @@ if [ "$COMMAND" = "status" ]; then
                 if [ -n "$CID" ]; then
                     S_STATUS=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null) || S_STATUS="unknown"
                 fi
-                echo -e "\n  ${CYAN}${safe}${RESET}: ${S_STATUS}"
+                MODE_FILE="$session_dir/.mode"
+                MODE=""
+                [ -f "$MODE_FILE" ] && MODE=" ($(cat "$MODE_FILE"))"
+                echo -e "\n  ${CYAN}${safe}${RESET}: ${S_STATUS}${DIM}${MODE}${RESET}"
                 # Only show worktrees if session has worktree subdirectories
                 HAS_WT=false
                 for d in "$session_dir"/*/; do
