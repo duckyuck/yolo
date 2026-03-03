@@ -104,6 +104,20 @@ AGENTEOF
     fi
 fi
 
+# --- Git config ---
+# Copy host gitconfig and filter out macOS-specific settings (same pattern as SSH config above).
+# The host file is mounted read-only at /mnt/host-gitconfig; we create a writable copy.
+if [ -f /mnt/host-gitconfig ]; then
+    sed -e '/^[[:space:]]*helper[[:space:]]*=[[:space:]]*osxkeychain/d' \
+        -e '/^[[:space:]]*helper[[:space:]]*=[[:space:]]*\/usr\/lib\/git-core\/git-credential-osxkeychain/d' \
+        /mnt/host-gitconfig > /home/claude/.gitconfig
+fi
+
+# If GH_TOKEN is available, configure gh as the git credential helper for HTTPS
+if [ -n "${GH_TOKEN:-}" ]; then
+    gh auth setup-git 2>/dev/null || true
+fi
+
 # --- Claude config directory ---
 # Copy host Claude config directory into container (host mount is read-only)
 # Excludes projects/ (persisted via bind mount) and .credentials.json (shared bind mount)
@@ -174,6 +188,19 @@ for wt_dir in "${WORKDIR}"/*/; do
     wt_dir="${wt_dir%/}"
     if [ -d "$wt_dir/.git" ] || [ -f "$wt_dir/.git" ]; then
         accept_trust "$wt_dir"
+    fi
+done
+
+# --- Shell environment ---
+# Export WORKDIR and snap every new shell to it. Claude Code's Bash tool spawns
+# a new shell per command and may reset CWD to the wrong directory (e.g. the
+# main repo instead of the session worktree). This guarantees correct CWD.
+WORKDIR_EXPORT="export WORKDIR=\"${WORKDIR}\""
+WORKDIR_CD='[ -n "$WORKDIR" ] && cd "$WORKDIR"'
+for rcfile in /home/claude/.bashrc /home/claude/.profile; do
+    if ! grep -q 'cd "$WORKDIR"' "$rcfile" 2>/dev/null; then
+        echo "$WORKDIR_EXPORT" >> "$rcfile"
+        echo "$WORKDIR_CD" >> "$rcfile"
     fi
 done
 

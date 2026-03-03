@@ -25,8 +25,8 @@ services:
       GH_TOKEN: ${GH_TOKEN:-}
       YOLO_HOST_HOME: ${YOLO_HOST_HOME}
     volumes:
-      # Git config (read-only)
-      - ${YOLO_HOST_HOME}/.gitconfig:/home/claude/.gitconfig:ro
+      # Git config (staged read-only, entrypoint creates filtered copy)
+      - ${YOLO_HOST_HOME}/.gitconfig:/mnt/host-gitconfig:ro
 
       # SSH keys (staged read-only, entrypoint creates filtered copy)
       - ${YOLO_HOST_HOME}/.ssh:/mnt/host-ssh:ro

@@ -103,10 +103,23 @@ mkdir -p "$TMPDIR/external-skills/agent-browser"
 echo "name: agent-browser" > "$TMPDIR/external-skills/agent-browser/SKILL.md"
 ln -s "$TMPDIR/external-skills/agent-browser" "$MOCK_CLAUDE/skills/agent-browser"
 
+# Git config with macOS-specific credential helpers that should be filtered
+MOCK_GITCONFIG="$MOCK_HOME/.gitconfig"
+cat > "$MOCK_GITCONFIG" << 'GITCONF'
+[user]
+	name = Test User
+	email = test@example.com
+[credential]
+	helper = osxkeychain
+[push]
+	autoSetupRemote = true
+GITCONF
+
 # ─── Start container with real entrypoint ─────────────────────────────────────
 
 CONTAINER=$(docker run -d \
     -v "$MOCK_SSH:/mnt/host-ssh:ro" \
+    -v "$MOCK_GITCONFIG:/mnt/host-gitconfig:ro" \
     -v "$MOCK_CLAUDE:/mnt/host-claude:ro" \
     -v "$MOCK_HOME/.claude.json:/mnt/host-claude.json:ro" \
     -v "$MOCK_CLAUDE/.credentials.json:/home/claude/.claude/.credentials.json" \
@@ -115,6 +128,7 @@ CONTAINER=$(docker run -d \
     -e SESSION_NAME="test-ep" \
     -e HOST_HOME="$MOCK_HOME" \
     -e CLAUDE_MODEL="claude-opus-4-6" \
+    -e GH_TOKEN="ghp_fake_token_for_testing" \
     "$TEST_IMAGE"
 )
 
@@ -216,6 +230,7 @@ if [ "$(uname)" = "Darwin" ] && ssh-add -l >/dev/null 2>&1; then
 
     FORWARDED_CONTAINER=$(docker run -d \
         -v "$MOCK_SSH:/mnt/host-ssh:ro" \
+        -v "$MOCK_GITCONFIG:/mnt/host-gitconfig:ro" \
         -v "$MOCK_CLAUDE:/mnt/host-claude:ro" \
         -v "$MOCK_HOME/.claude.json:/mnt/host-claude.json:ro" \
         -v "$MOCK_CLAUDE/.credentials.json:/home/claude/.claude/.credentials.json" \
@@ -266,6 +281,47 @@ if [ "$(uname)" = "Darwin" ] && ssh-add -l >/dev/null 2>&1; then
         fail "Forwarded agent container did not start tmux session"
         docker logs "$FORWARDED_CONTAINER" 2>&1 | tail -10 | sed 's/^/    /'
     fi
+fi
+
+# ─── Git config ──────────────────────────────────────────────────────────────
+
+echo -e "\n${BOLD}Git config${RESET}"
+
+# Gitconfig file created from host copy
+if docker exec "$CONTAINER" test -f /home/claude/.gitconfig 2>/dev/null; then
+    pass "Gitconfig copied from host"
+else
+    fail "Gitconfig should be copied from host"
+fi
+
+GIT_CONFIG=$(docker exec "$CONTAINER" cat /home/claude/.gitconfig 2>/dev/null) || true
+
+# macOS credential helper filtered
+if [[ "$GIT_CONFIG" == *"osxkeychain"* ]]; then
+    fail "Gitconfig should filter credential.helper = osxkeychain"
+else
+    pass "macOS osxkeychain credential helper filtered"
+fi
+
+# Non-macOS options preserved
+if [[ "$GIT_CONFIG" == *"autoSetupRemote"* ]]; then
+    pass "Non-macOS git options preserved"
+else
+    fail "Non-macOS git options should be preserved — got: $GIT_CONFIG"
+fi
+
+if [[ "$GIT_CONFIG" == *"Test User"* ]]; then
+    pass "Git user config preserved"
+else
+    fail "Git user config should be preserved — got: $GIT_CONFIG"
+fi
+
+# gh configured as credential helper when GH_TOKEN is set
+GH_CRED=$(docker exec "$CONTAINER" git config --global --get credential.https://github.com.helper 2>/dev/null) || true
+if [[ "$GH_CRED" == *"gh auth"* ]]; then
+    pass "gh configured as credential helper (GH_TOKEN set)"
+else
+    fail "gh should be configured as credential helper — got: $GH_CRED"
 fi
 
 # ─── Claude config ────────────────────────────────────────────────────────────
@@ -386,6 +442,34 @@ if [[ "$WINDOWS" == *"claude"* ]]; then
     pass "Tmux window named 'claude'"
 else
     fail "Tmux window should be named 'claude' — got: $WINDOWS"
+fi
+
+# ─── Shell environment ───────────────────────────────────────────────────────
+
+echo -e "\n${BOLD}Shell environment${RESET}"
+
+BASHRC=$(docker exec "$CONTAINER" cat /home/claude/.bashrc 2>/dev/null) || true
+
+# WORKDIR exported in .bashrc
+if [[ "$BASHRC" == *"export WORKDIR="* ]]; then
+    pass "WORKDIR exported in .bashrc"
+else
+    fail "WORKDIR should be exported in .bashrc"
+fi
+
+# WORKDIR cd snap in .bashrc
+if [[ "$BASHRC" == *'cd "$WORKDIR"'* ]]; then
+    pass "WORKDIR cd snap in .bashrc"
+else
+    fail ".bashrc should snap CWD to WORKDIR"
+fi
+
+# New shell starts in WORKDIR regardless of initial CWD
+SHELL_CWD=$(docker exec "$CONTAINER" bash -lc 'pwd' 2>/dev/null) || true
+if [[ "$SHELL_CWD" == "$WORKDIR" ]]; then
+    pass "New shell starts in WORKDIR"
+else
+    fail "New shell should start in WORKDIR — got: $SHELL_CWD"
 fi
 
 # ─── Shutdown ────────────────────────────────────────────────────────────────

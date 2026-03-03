@@ -1647,7 +1647,6 @@ case "$COMMAND" in
     fi
 
     # Ensure bind-mounted files exist (Docker creates directories if files are missing)
-    [ -f "$YOLO_HOST_HOME/.gitconfig" ] || touch "$YOLO_HOST_HOME/.gitconfig" 2>/dev/null || true
     mkdir -p "$YOLO_HOST_HOME/.claude" 2>/dev/null || true
     [ -f "$YOLO_HOST_HOME/.claude/CLAUDE.md" ] || touch "$YOLO_HOST_HOME/.claude/CLAUDE.md" 2>/dev/null || true
 
