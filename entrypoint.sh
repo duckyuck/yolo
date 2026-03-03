@@ -179,11 +179,9 @@ tmux set-environment -g SSH_AGENT_PID "${SSH_AGENT_PID:-}" 2>/dev/null || true
 
 tmux new-session -d -s "$SESSION" -n claude -c "${WORKDIR}"
 CLAUDE_CMD="claude --dangerously-skip-permissions --model ${CLAUDE_MODEL}"
-if [ "${CLAUDE_CONTINUE:-}" = "true" ]; then
-    # Only --continue if conversation history exists; otherwise start fresh
-    if find /home/claude/.claude/projects -mindepth 1 -type f -print -quit 2>/dev/null | grep -q .; then
-        CLAUDE_CMD="${CLAUDE_CMD} --continue"
-    fi
+# Auto-continue if conversation history exists from a previous run
+if find /home/claude/.claude/projects -mindepth 1 -type f -print -quit 2>/dev/null | grep -q .; then
+    CLAUDE_CMD="${CLAUDE_CMD} --continue"
 fi
 tmux send-keys -t "${SESSION}:claude" "$CLAUDE_CMD" Enter
 
@@ -200,8 +198,12 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# Wait for signals (sleep wakes up immediately on SIGTERM)
+# Wait for signals or shutdown sentinel
 while true; do
     sleep 1 &
     wait $!
+    # Check if shutdown was requested via Ctrl-B Shift-Q
+    if [ -f /tmp/.yolo-shutdown ]; then
+        cleanup
+    fi
 done
