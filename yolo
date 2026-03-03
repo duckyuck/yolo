@@ -1560,9 +1560,14 @@ case "$COMMAND" in
     mkdir -p "$CLAUDE_PROJECTS_DIR"
     MOUNTS+=("$CLAUDE_PROJECTS_DIR:/home/claude/.claude/projects")
 
-    # Add extra mounts from ~/.yolo/mounts (one host path per line)
+    # Add extra mounts from mounts files (one per line)
+    # Format: host_path[:/container/path][:rw|:ro]
     # Paths are mounted read-only by default; append :rw for read-write
-    if [ -f "$YOLO_HOME/mounts" ]; then
+    # Container path defaults to host path if not specified
+    mounts_files=()
+    [ -f "$YOLO_HOME/mounts" ] && mounts_files+=("$YOLO_HOME/mounts")
+    [ -f "$PROJECT_DIR/.yolo/mounts" ] && mounts_files+=("$PROJECT_DIR/.yolo/mounts")
+    for mounts_file in "${mounts_files[@]}"; do
         while IFS= read -r mount_path || [ -n "$mount_path" ]; do
             mount_path="${mount_path%%#*}"   # strip comments
             mount_path="${mount_path%"${mount_path##*[! ]}"}"  # trim trailing whitespace
@@ -1578,15 +1583,22 @@ case "$COMMAND" in
             fi
             # Trim trailing whitespace from path (handles "~/path :rw")
             mount_path="${mount_path%"${mount_path##*[! ]}"}"
+            # Check for explicit container path (host:/container format)
+            container_path=""
+            if [[ "$mount_path" == *:/* ]]; then
+                container_path="${mount_path#*:}"
+                mount_path="${mount_path%%:*}"
+            fi
             # Expand ~ to $YOLO_HOST_HOME
             mount_path="${mount_path/#\~/$YOLO_HOST_HOME}"
+            [ -z "$container_path" ] && container_path="$mount_path"
             if [ -e "$mount_path" ]; then
-                MOUNTS+=("${mount_path}:${mount_path}:${mode}")
+                MOUNTS+=("${mount_path}:${container_path}:${mode}")
             else
                 warning "Extra mount path not found: $mount_path"
             fi
-        done < "$YOLO_HOME/mounts"
-    fi
+        done < "$mounts_file"
+    done
 
     # Docker socket (enables nested yolo — Docker outside of Docker)
     if [ -S /var/run/docker.sock ]; then
@@ -1652,10 +1664,14 @@ case "$COMMAND" in
     HASH_FILE="$YOLO_DIR/$SAFE_NAME/.config-hash"
     HASH_FILES=("$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" "${USER_OVERRIDES[@]}")
     [ -n "${PROJECT_DOCKERFILE:-}" ] && HASH_FILES+=("$PROJECT_DOCKERFILE")
+    [ -f "$PROJECT_DIR/.yolo/mounts" ] && HASH_FILES+=("$PROJECT_DIR/.yolo/mounts")
     [ -f "${PRE_UP_ENV:-}" ] && HASH_FILES+=("$PRE_UP_ENV")
     CONFIG_HASH=$(cat "${HASH_FILES[@]}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
     STORED_HASH=""
     [ -f "$HASH_FILE" ] && STORED_HASH=$(cat "$HASH_FILE")
+
+    # Per-file hashes for reporting what changed
+    HASH_MANIFEST="$YOLO_DIR/$SAFE_NAME/.config-manifest"
 
     if [ -n "$EXISTING_CONTAINER" ] && [ "$CONFIG_HASH" = "$STORED_HASH" ]; then
         # Fast path: container running, no config changes — sync and reattach
@@ -1693,6 +1709,26 @@ case "$COMMAND" in
     # Either no container, or config changed — let compose handle it
     if [ -n "$EXISTING_CONTAINER" ]; then
         info "Config changed, recreating container..."
+        # Report which files changed
+        if [ -f "$HASH_MANIFEST" ]; then
+            while IFS=' ' read -r old_hash old_file; do
+                cur_hash=$(shasum -a 256 "$old_file" 2>/dev/null | cut -d' ' -f1)
+                if [ "$cur_hash" != "$old_hash" ]; then
+                    label="${old_file##*/}"
+                    # Distinguish project Dockerfile from built-in
+                    [[ "$old_file" == */.yolo/* ]] && label=".yolo/$label"
+                    info "  changed: $label"
+                fi
+            done < "$HASH_MANIFEST"
+            # Check for new files not in the old manifest
+            for f in "${HASH_FILES[@]}"; do
+                if [ -f "$f" ] && ! grep -q " $f\$" "$HASH_MANIFEST" 2>/dev/null; then
+                    label="${f##*/}"
+                    [[ "$f" == */.yolo/* ]] && label=".yolo/$label"
+                    info "  added: $label"
+                fi
+            done
+        fi
         export CLAUDE_CONTINUE=true
     fi
 
@@ -1739,8 +1775,12 @@ case "$COMMAND" in
     fi
     success "Container started"
 
-    # Store config hash for future change detection
+    # Store config hash and per-file manifest for future change detection
     echo "$CONFIG_HASH" > "$HASH_FILE"
+    : > "$HASH_MANIFEST"
+    for f in "${HASH_FILES[@]}"; do
+        [ -f "$f" ] && shasum -a 256 "$f" >> "$HASH_MANIFEST"
+    done
 
     CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null)
 
