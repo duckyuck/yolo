@@ -126,40 +126,37 @@ else
     fail "Stderr handling — stderr: '$STDERR_OUT', env: $(cat "$ENV_FILE6" 2>/dev/null)"
 fi
 
-# ─── Integration: compose command includes --env-file ────────────────────────
+# ─── Integration: compose override includes env_file ─────────────────────────
 
 echo -e "\n${BOLD}Compose integration${RESET}"
 
 # Extract generate_compose_override for setup
 eval "$(sed -n '/^generate_compose_override()/,/^}/p' "$(dirname "$0")/../yolo")"
 
-# 7. Pre-up env file adds --env-file to compose invocation
-# Simulate the wiring: if PRE_UP_ENV exists and is non-empty, COMPOSE gets --env-file
+# 7. Pre-up env file adds env_file to compose override
 PRE_UP_ENV="$TMPDIR/test-pre-up.env"
 echo "MY_VAR=hello" > "$PRE_UP_ENV"
-COMPOSE=(docker compose -f dummy.yml)
-if [ -f "$PRE_UP_ENV" ] && [ -s "$PRE_UP_ENV" ]; then
-    COMPOSE+=(--env-file "$PRE_UP_ENV")
-fi
-if [[ " ${COMPOSE[*]} " == *" --env-file "* ]]; then
-    pass "--env-file added to compose when pre-up.env exists"
+PORTS=()
+SSH_AGENT_FORWARDED=false
+generate_compose_override "$TMPDIR/override-with-env.yml" "$TMPDIR:$TMPDIR"
+if grep -q "env_file:" "$TMPDIR/override-with-env.yml" \
+   && grep -q "$PRE_UP_ENV" "$TMPDIR/override-with-env.yml"; then
+    pass "env_file added to compose override when pre-up.env exists"
 else
-    fail "--env-file should be in compose command — got: ${COMPOSE[*]}"
+    fail "env_file should be in compose override — got:\n$(cat "$TMPDIR/override-with-env.yml")"
 fi
 
-# 8. No pre-up env file → no --env-file in compose
-COMPOSE2=(docker compose -f dummy.yml)
-EMPTY_ENV="$TMPDIR/nonexistent.env"
-if [ -f "$EMPTY_ENV" ] && [ -s "$EMPTY_ENV" ]; then
-    COMPOSE2+=(--env-file "$EMPTY_ENV")
-fi
-if [[ " ${COMPOSE2[*]} " != *" --env-file "* ]]; then
-    pass "No --env-file when pre-up.env missing"
+# 8. No pre-up env file → no env_file in compose override
+unset PRE_UP_ENV
+generate_compose_override "$TMPDIR/override-no-env.yml" "$TMPDIR:$TMPDIR"
+if ! grep -q "env_file:" "$TMPDIR/override-no-env.yml"; then
+    pass "No env_file when pre-up.env missing"
 else
-    fail "Should not add --env-file when file missing — got: ${COMPOSE2[*]}"
+    fail "Should not add env_file when file missing — got:\n$(cat "$TMPDIR/override-no-env.yml")"
 fi
 
 # 9. Config hash differs with vs without pre-up env file
+PRE_UP_ENV="$TMPDIR/test-pre-up.env"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 HASH_WITHOUT=$(cat "$SCRIPT_DIR/docker-compose.yml" "$SCRIPT_DIR/Dockerfile" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
 HASH_WITH=$(cat "$SCRIPT_DIR/docker-compose.yml" "$SCRIPT_DIR/Dockerfile" "$PRE_UP_ENV" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
@@ -233,7 +230,7 @@ echo "ANOTHER_VAR=42"
 HOOK
                     chmod +x .yolo/pre-up
 
-                    # Stub docker compose — capture the compose command to verify --env-file
+                    # Stub docker compose — let yolo generate the override, then check it
                     mkdir -p /tmp/bin
                     cat > /tmp/bin/docker << '"'"'WRAPPER'"'"'
 #!/bin/bash
@@ -258,9 +255,10 @@ WRAPPER
                     output=$(bash ./yolo up 2>&1) || true
                     echo "$output"
 
-                    # Check compose was called with --env-file
-                    if [ -f /tmp/compose-args.log ] && grep -q "\-\-env-file" /tmp/compose-args.log; then
-                        echo "ENV_FILE_PASSED"
+                    # Check the compose override contains env_file directive
+                    override=$(find "$YOLO_HOME" -name "docker-compose.override.yml" 2>/dev/null | head -1)
+                    if [ -n "$override" ] && grep -q "env_file:" "$override"; then
+                        echo "ENV_FILE_IN_OVERRIDE"
                     fi
 
                     # Check the env file was created with correct content
@@ -277,10 +275,10 @@ WRAPPER
             fail "Should show 'Running pre-up hook' — got:\n$(echo "$E2E_OUTPUT" | tail -10)"
         fi
 
-        if [[ "$E2E_OUTPUT" == *"ENV_FILE_PASSED"* ]]; then
-            pass "--env-file passed to docker compose"
+        if [[ "$E2E_OUTPUT" == *"ENV_FILE_IN_OVERRIDE"* ]]; then
+            pass "env_file directive in compose override"
         else
-            fail "--env-file should be passed to compose — got:\n$(echo "$E2E_OUTPUT" | tail -10)"
+            fail "env_file should be in compose override — got:\n$(echo "$E2E_OUTPUT" | tail -10)"
         fi
 
         if [[ "$E2E_OUTPUT" == *"ENV_FILE_CORRECT"* ]]; then

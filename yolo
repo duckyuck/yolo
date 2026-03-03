@@ -724,6 +724,10 @@ generate_compose_override() {
             echo "    environment:"
             echo "      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock"
         fi
+        if [ -f "${PRE_UP_ENV:-}" ] && [ -s "$PRE_UP_ENV" ]; then
+            echo "    env_file:"
+            echo "      - ${PRE_UP_ENV}"
+        fi
     } > "$override_file"
 }
 
@@ -1635,11 +1639,6 @@ case "$COMMAND" in
     for uf in "${USER_OVERRIDES[@]}"; do
         COMPOSE+=(-f "$uf")
     done
-
-    # Add pre-up env vars if hook produced any
-    if [ -f "$PRE_UP_ENV" ] && [ -s "$PRE_UP_ENV" ]; then
-        COMPOSE+=(--env-file "$PRE_UP_ENV")
-    fi
 
     # Authenticate
     step "Authenticating"
