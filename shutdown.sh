@@ -59,15 +59,9 @@ read -r choice
 
 case "${choice:-n}" in
     y|Y)
-        if [ -S /var/run/docker.sock ] && command -v docker >/dev/null 2>&1; then
-            # Force-remove this container — Docker daemon completes the
-            # removal even after all container processes are killed.
-            docker rm -f "$(hostname)" >/dev/null 2>&1 || true
-        else
-            # No Docker socket — signal entrypoint to exit
-            touch /tmp/.yolo-shutdown
-            tmux kill-session
-        fi
+        # Kill tmux session — host-side yolo detects this and handles
+        # container removal and cleanup.
+        tmux kill-session
         ;;
     *)
         # Popup closes, user stays in tmux

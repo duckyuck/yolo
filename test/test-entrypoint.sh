@@ -237,7 +237,7 @@ fi
 TEMP_SKILLS="$TMPDIR/skills-resolved"
 rm -rf "$TEMP_SKILLS"
 cp -rL "$MOCK_CLAUDE/skills" "$TEMP_SKILLS" 2>/dev/null || true
-docker cp "$TEMP_SKILLS/." "$CONTAINER:/home/claude/.claude/skills/" >/dev/null 2>&1
+docker cp "$TEMP_SKILLS/." "$CONTAINER:/home/claude/.claude/skills/" >/dev/null 2>&1 || true
 rm -rf "$TEMP_SKILLS"
 
 # After sync: symlinked skill should now be a real directory with content
@@ -312,6 +312,25 @@ if [[ "$WINDOWS" == *"claude"* ]]; then
     pass "Tmux window named 'claude'"
 else
     fail "Tmux window should be named 'claude' — got: $WINDOWS"
+fi
+
+# ─── Shutdown ────────────────────────────────────────────────────────────────
+
+echo -e "\n${BOLD}Shutdown${RESET}"
+
+# shutdown.sh exists and is executable
+if docker exec "$CONTAINER" test -x /usr/local/bin/shutdown.sh 2>/dev/null; then
+    pass "shutdown.sh installed and executable"
+else
+    fail "shutdown.sh should be installed and executable"
+fi
+
+# Tmux Shift-Q binding uses display-popup with shutdown.sh
+TMUX_BINDINGS=$(docker exec "$CONTAINER" tmux list-keys 2>/dev/null) || true
+if [[ "$TMUX_BINDINGS" == *"display-popup"*"shutdown.sh"* ]]; then
+    pass "Shift-Q binding uses display-popup with shutdown.sh"
+else
+    fail "Shift-Q should use display-popup with shutdown.sh — got: $(echo "$TMUX_BINDINGS" | grep -i 'Q ')"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────

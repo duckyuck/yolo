@@ -45,6 +45,10 @@ ENV PATH="/home/claude/.local/bin:${PATH}"
 # Tmux config
 COPY --chown=claude:${HOST_GID} tmux.conf /home/claude/.tmux.conf
 
+# Shutdown confirmation script (for Ctrl-B Shift-Q popup)
+COPY --chown=claude:${HOST_GID} shutdown.sh /usr/local/bin/shutdown.sh
+RUN chmod +x /usr/local/bin/shutdown.sh
+
 # Entrypoint
 USER root
 COPY --chown=claude:${HOST_GID} entrypoint.sh /usr/local/bin/entrypoint.sh

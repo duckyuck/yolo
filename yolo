@@ -30,6 +30,7 @@ for arg in "$@"; do
     case "$arg" in
         --verbose|-v) VERBOSE=true ;;
         --worktree) WORKTREE_MODE=true ;;
+        --*) echo "Error: unknown flag '$arg'" >&2; exit 1 ;;
     esac
 done
 
@@ -762,7 +763,7 @@ sync_config_to_container() {
             local temp_skills="/tmp/yolo-${SAFE_NAME}-skills-resolved"
             rm -rf "$temp_skills"
             cp -rL "$HOME/.claude/skills" "$temp_skills" 2>/dev/null || true
-            docker cp "$temp_skills/." "$container:/home/claude/.claude/skills/" >/dev/null 2>&1
+            docker cp "$temp_skills/." "$container:/home/claude/.claude/skills/" >/dev/null 2>&1 || true
             rm -rf "$temp_skills"
         fi
     fi
@@ -1345,6 +1346,7 @@ while [ $# -gt 0 ]; do
             [ $# -gt 0 ] || { error "--port requires a value"; exit 1; }
             PORTS+=("$1")
             ;;
+        --*) error "Unknown flag '$1'"; exit 1 ;;
         *) REMAINING_ARGS+=("$1") ;;
     esac
     shift
@@ -1521,6 +1523,24 @@ case "$COMMAND" in
         echo ""
         step "Attaching to tmux session"
         attach_to_claude "$EXISTING_CONTAINER" "$SESSION_NAME" true
+        # Reset terminal — tmux mouse mode escapes leak if container is force-removed
+        printf '\e[?1000l\e[?1002l\e[?1003l\e[?1006l' 2>/dev/null
+        # If tmux session is gone, user triggered shutdown (Ctrl-B Shift-Q) —
+        # tear down the compose project completely.
+        if ! docker exec "$EXISTING_CONTAINER" tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+            echo ""
+            step "Removing container"
+            COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml")
+            "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1
+            success "Container removed"
+            echo -ne "Clean up session data for '${SESSION_NAME}'? [y/${BOLD}N${RESET}] "
+            read -r cleanup_choice
+            if [[ "${cleanup_choice:-n}" =~ ^[yY]$ ]]; then
+                rm -rf "${YOLO_DIR}/${SAFE_NAME}"
+                rm -rf "/tmp/yolo-${SAFE_NAME}-"* 2>/dev/null
+                success "Session cleaned up"
+            fi
+        fi
         exit 0
     fi
 
@@ -1584,6 +1604,23 @@ case "$COMMAND" in
     step "Attaching to tmux session"
     echo -e "  ${DIM}Tip: ${BOLD}Ctrl-B d${RESET}${DIM} to detach (container keeps running)${RESET}"
     attach_to_claude "$CONTAINER" "$SESSION_NAME"
+    # Reset terminal — tmux mouse mode escapes leak if container is force-removed
+    printf '\e[?1000l\e[?1002l\e[?1003l\e[?1006l' 2>/dev/null
+    # If tmux session is gone, user triggered shutdown (Ctrl-B Shift-Q) —
+    # tear down the compose project completely.
+    if ! docker exec "$CONTAINER" tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+        echo ""
+        step "Removing container"
+        "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1
+        success "Container removed"
+        echo -ne "Clean up session data for '${SESSION_NAME}'? [y/${BOLD}N${RESET}] "
+        read -r cleanup_choice
+        if [[ "${cleanup_choice:-n}" =~ ^[yY]$ ]]; then
+            rm -rf "${YOLO_DIR}/${SAFE_NAME}"
+            rm -rf "/tmp/yolo-${SAFE_NAME}-"* 2>/dev/null
+            success "Session cleaned up"
+        fi
+    fi
     ;;
 
   down)

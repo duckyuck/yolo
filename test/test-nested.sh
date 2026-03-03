@@ -94,7 +94,7 @@ E2E_SRC="$TMPDIR/e2e-src"
 E2E_YOLO_HOME="$TMPDIR/e2e-yolo-home"
 mkdir -p "$E2E_SRC/hooks" "$E2E_YOLO_HOME"
 cp "$SCRIPT_DIR/yolo" "$SCRIPT_DIR/docker-compose.yml" "$SCRIPT_DIR/Dockerfile" \
-   "$SCRIPT_DIR/entrypoint.sh" "$SCRIPT_DIR/tmux.conf" "$E2E_SRC/"
+   "$SCRIPT_DIR/entrypoint.sh" "$SCRIPT_DIR/tmux.conf" "$SCRIPT_DIR/shutdown.sh" "$E2E_SRC/"
 cp "$SCRIPT_DIR"/hooks/*.sh "$E2E_SRC/hooks/"
 
 E2E_OUTPUT=$(
@@ -124,6 +124,7 @@ E2E_OUTPUT=$(
             cp /opt/yolo-src/Dockerfile .
             cp /opt/yolo-src/entrypoint.sh .
             cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
             cp -r /opt/yolo-src/hooks .
 
             # Stub docker: let real docker handle "info" (yolo checks daemon is

@@ -34,7 +34,7 @@ TEMP_DIR=$(mktemp -d)
 
 BUNDLE_DIR="$TEMP_DIR/yolo-${VERSION}"
 mkdir -p "$BUNDLE_DIR/hooks"
-cp yolo docker-compose.yml Dockerfile entrypoint.sh tmux.conf "$BUNDLE_DIR/"
+cp yolo docker-compose.yml Dockerfile entrypoint.sh tmux.conf shutdown.sh "$BUNDLE_DIR/"
 cp hooks/*.sh "$BUNDLE_DIR/hooks/"
 chmod +x "$BUNDLE_DIR/yolo" "$BUNDLE_DIR/entrypoint.sh" "$BUNDLE_DIR/hooks/"*.sh
 
@@ -71,7 +71,7 @@ tar xzf /tmp/yolo-test.tar.gz -C "\$TEMP_DIR"
 mkdir -p "\$YOLO_HOME/bin" "\$YOLO_HOME/lib" "\$YOLO_HOME/lib/hooks"
 cp "\$TEMP_DIR/yolo-\${LATEST_TAG}/yolo" "\$YOLO_HOME/bin/yolo"
 chmod +x "\$YOLO_HOME/bin/yolo"
-for f in docker-compose.yml Dockerfile entrypoint.sh tmux.conf; do
+for f in docker-compose.yml Dockerfile entrypoint.sh tmux.conf shutdown.sh; do
     cp "\$TEMP_DIR/yolo-\${LATEST_TAG}/\$f" "\$YOLO_HOME/lib/\$f"
 done
 cp "\$TEMP_DIR/yolo-\${LATEST_TAG}/hooks/"*.sh "\$YOLO_HOME/lib/hooks/" 2>/dev/null || true
@@ -117,6 +117,7 @@ VERIFY_OUTPUT=$(docker run --rm yolo-install-test bash -c '
         lib/Dockerfile \
         lib/entrypoint.sh \
         lib/tmux.conf \
+        lib/shutdown.sh \
         lib/hooks/worktree-create.sh \
         lib/hooks/worktree-remove.sh \
         version; do

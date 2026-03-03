@@ -56,7 +56,7 @@ E2E_SRC="$TMPDIR/e2e-src"
 E2E_YOLO_HOME="$TMPDIR/e2e-yolo-home"
 mkdir -p "$E2E_SRC/hooks" "$E2E_YOLO_HOME"
 cp "$SCRIPT_DIR/yolo" "$SCRIPT_DIR/docker-compose.yml" "$SCRIPT_DIR/Dockerfile" \
-   "$SCRIPT_DIR/entrypoint.sh" "$SCRIPT_DIR/tmux.conf" "$E2E_SRC/"
+   "$SCRIPT_DIR/entrypoint.sh" "$SCRIPT_DIR/tmux.conf" "$SCRIPT_DIR/shutdown.sh" "$E2E_SRC/"
 cp "$SCRIPT_DIR"/hooks/*.sh "$E2E_SRC/hooks/"
 
 E2E_OUTPUT=$(
@@ -82,6 +82,7 @@ E2E_OUTPUT=$(
             cp /opt/yolo-src/Dockerfile .
             cp /opt/yolo-src/entrypoint.sh .
             cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
             cp -r /opt/yolo-src/hooks .
 
             # Stub docker compose/exec/inspect (cannot build inner image in tests)
@@ -161,6 +162,7 @@ WT_OUTPUT=$(
             cp /opt/yolo-src/Dockerfile .
             cp /opt/yolo-src/entrypoint.sh .
             cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
             cp -r /opt/yolo-src/hooks .
 
             bash ./yolo up --worktree 2>&1 && echo "SHOULD_HAVE_FAILED" || echo "CORRECTLY_FAILED"
@@ -200,6 +202,7 @@ WT_GIT_OUTPUT=$(
             cp /opt/yolo-src/Dockerfile .
             cp /opt/yolo-src/entrypoint.sh .
             cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
             cp -r /opt/yolo-src/hooks .
 
             mkdir -p /tmp/bin
@@ -267,6 +270,7 @@ MOUNT_OUTPUT=$(
             cp /opt/yolo-src/Dockerfile .
             cp /opt/yolo-src/entrypoint.sh .
             cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
             cp -r /opt/yolo-src/hooks .
 
             # Stub docker so up completes
@@ -336,6 +340,7 @@ MISMATCH_OUTPUT=$(
             cp /opt/yolo-src/Dockerfile .
             cp /opt/yolo-src/entrypoint.sh .
             cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
             cp -r /opt/yolo-src/hooks .
 
             mkdir -p /tmp/bin
@@ -405,6 +410,7 @@ MIGRATE_OUTPUT=$(
             cp /opt/yolo-src/Dockerfile .
             cp /opt/yolo-src/entrypoint.sh .
             cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
             cp -r /opt/yolo-src/hooks .
 
             # Pre-populate .claude-projects with an old worktree-style key
@@ -458,6 +464,155 @@ if [[ "$MIGRATE_OUTPUT" == *"MIGRATION_OK"* ]]; then
     pass "Conversation data migrated to new project key"
 else
     fail "Conversation data should be migrated — got:\n$(echo "$MIGRATE_OUTPUT" | tail -10)"
+fi
+
+# ─── Test: Shift-Q shutdown triggers container removal and session cleanup ────
+
+SHUTDOWN_OUTPUT=$(
+    docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$E2E_SRC:/opt/yolo-src:ro" \
+        -v "$E2E_YOLO_HOME:$E2E_YOLO_HOME" \
+        -e YOLO_HOST_HOME="$HOME" \
+        -e YOLO_HOME="$E2E_YOLO_HOME" \
+        -e ANTHROPIC_API_KEY="sk-test-fake" \
+        --entrypoint /bin/bash \
+        "$TEST_IMAGE" \
+        -c '
+            set -e
+
+            PROJ=$(mktemp -d)
+            cd "$PROJ"
+
+            cp /opt/yolo-src/yolo .
+            cp /opt/yolo-src/docker-compose.yml .
+            cp /opt/yolo-src/Dockerfile .
+            cp /opt/yolo-src/entrypoint.sh .
+            cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
+            cp -r /opt/yolo-src/hooks .
+
+            # Stub docker — simulate shutdown scenario:
+            # - compose ps returns a container id (already running)
+            # - exec with tmux attach exits immediately (simulates detach)
+            # - exec with tmux has-session FAILS (session was killed by Shift-Q)
+            # - compose down is intercepted and logged
+            mkdir -p /tmp/bin
+            cat > /tmp/bin/docker <<'"'"'WRAPPER'"'"'
+#!/bin/bash
+echo "$@" >> /tmp/docker-calls.log
+if [ "$1" = "compose" ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            up)   exit 0 ;;
+            down) echo "COMPOSE_DOWN_CALLED" >> /tmp/compose-calls.log; exit 0 ;;
+            ps)   echo "fake-container-id"; exit 0 ;;
+        esac
+    done
+fi
+case "$1" in
+    exec)
+        # Check if this is a tmux has-session check
+        if [[ "$*" == *"tmux has-session"* ]]; then
+            exit 1  # Session gone (shutdown)
+        fi
+        # tmux attach — just exit (simulates detach)
+        exit 0
+        ;;
+    inspect) echo "running"; exit 0 ;;
+esac
+exec /usr/bin/docker "$@"
+WRAPPER
+            chmod +x /tmp/bin/docker
+            export PATH="/tmp/bin:$PATH"
+
+            # First run: creates session data dir and config hash
+            bash ./yolo up shutdown-test 2>&1 >/dev/null || true
+
+            # Second run: fast path (container "already running"), then shutdown
+            # Pipe "y" to answer the cleanup prompt
+            output=$(echo "y" | bash ./yolo up shutdown-test 2>&1) || true
+            echo "$output"
+
+            # Check results
+            echo "=== CHECKS ==="
+            if grep -q "COMPOSE_DOWN_CALLED" /tmp/compose-calls.log 2>/dev/null; then
+                echo "COMPOSE_DOWN_OK"
+            else
+                echo "COMPOSE_DOWN_MISSING"
+            fi
+
+            PROJ_BASE=$(basename "$PROJ")
+            SESSION_DIR="'"$E2E_YOLO_HOME"'/$PROJ_BASE/shutdown-test"
+            if [ -d "$SESSION_DIR" ]; then
+                echo "SESSION_DIR_EXISTS"
+            else
+                echo "SESSION_DIR_CLEANED"
+            fi
+        '
+) 2>&1
+
+if [[ "$SHUTDOWN_OUTPUT" == *"Removing container"* ]]; then
+    pass "Shutdown triggers container removal"
+else
+    fail "Shutdown should trigger container removal — got:\n$(echo "$SHUTDOWN_OUTPUT" | tail -10)"
+fi
+
+if [[ "$SHUTDOWN_OUTPUT" == *"COMPOSE_DOWN_OK"* ]]; then
+    pass "docker compose down called on shutdown"
+else
+    fail "docker compose down should be called — got:\n$(echo "$SHUTDOWN_OUTPUT" | tail -10)"
+fi
+
+if [[ "$SHUTDOWN_OUTPUT" == *"Container removed"* ]]; then
+    pass "Container removed message shown"
+else
+    fail "Should show container removed message — got:\n$(echo "$SHUTDOWN_OUTPUT" | tail -10)"
+fi
+
+if [[ "$SHUTDOWN_OUTPUT" == *"SESSION_DIR_CLEANED"* ]]; then
+    pass "Session data cleaned up after user confirms"
+else
+    fail "Session data should be cleaned up — got:\n$(echo "$SHUTDOWN_OUTPUT" | tail -10)"
+fi
+
+if [[ "$SHUTDOWN_OUTPUT" == *"Session cleaned up"* ]]; then
+    pass "Session cleanup confirmation shown"
+else
+    fail "Should show cleanup confirmation — got:\n$(echo "$SHUTDOWN_OUTPUT" | tail -10)"
+fi
+
+# ─── Test: unknown flags are rejected ─────────────────────────────────────
+
+UNKNOWN_FLAG_OUTPUT=$(
+    docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$E2E_SRC:/opt/yolo-src:ro" \
+        -v "$E2E_YOLO_HOME:$E2E_YOLO_HOME" \
+        -e YOLO_HOST_HOME="$HOME" \
+        -e YOLO_HOME="$E2E_YOLO_HOME" \
+        -e ANTHROPIC_API_KEY="sk-test-fake" \
+        --entrypoint /bin/bash \
+        "$TEST_IMAGE" \
+        -c '
+            PROJ=$(mktemp -d)
+            cd "$PROJ"
+            cp /opt/yolo-src/yolo .
+            cp /opt/yolo-src/docker-compose.yml .
+            cp /opt/yolo-src/Dockerfile .
+            cp /opt/yolo-src/entrypoint.sh .
+            cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
+            cp -r /opt/yolo-src/hooks .
+
+            bash ./yolo up test --workstree 2>&1 && echo "SHOULD_HAVE_FAILED" || echo "CORRECTLY_FAILED"
+        '
+) 2>&1
+
+if [[ "$UNKNOWN_FLAG_OUTPUT" == *"CORRECTLY_FAILED"* ]] && [[ "$UNKNOWN_FLAG_OUTPUT" == *"unknown flag"* ]]; then
+    pass "Unknown flag --workstree is rejected"
+else
+    fail "Unknown flags should be rejected — got:\n$(echo "$UNKNOWN_FLAG_OUTPUT" | tail -5)"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
