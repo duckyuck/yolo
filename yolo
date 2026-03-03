@@ -745,6 +745,26 @@ collect_user_overrides() {
     done
 }
 
+run_pre_up_hook() {
+    local project_dir="$1"
+    local env_file="$2"
+    local hook="$project_dir/.yolo/pre-up"
+
+    [ -x "$hook" ] || return 0
+
+    step "Running pre-up hook"
+    local output
+    output=$("$hook") || {
+        error "Pre-up hook failed (exit $?): $hook"
+        return 1
+    }
+
+    if [ -n "$output" ]; then
+        echo "$output" > "$env_file"
+        success "Pre-up hook exported $(echo "$output" | wc -l | tr -d ' ') variable(s)"
+    fi
+}
+
 # ─── Config Sync ──────────────────────────────────────────────────────────────
 
 sync_config_to_container() {
@@ -1580,6 +1600,10 @@ case "$COMMAND" in
         export PROJECT_DOCKERFILE="$PROJECT_DIR/.yolo/Dockerfile"
     fi
 
+    # Run project pre-up hook (extracts env vars for container)
+    PRE_UP_ENV="$YOLO_DIR/$SAFE_NAME/.pre-up.env"
+    run_pre_up_hook "$PROJECT_DIR" "$PRE_UP_ENV" || exit 1
+
     # Generate compose override
     generate_compose_override "$OVERRIDE_FILE" "${MOUNTS[@]}"
 
@@ -1612,6 +1636,11 @@ case "$COMMAND" in
         COMPOSE+=(-f "$uf")
     done
 
+    # Add pre-up env vars if hook produced any
+    if [ -f "$PRE_UP_ENV" ] && [ -s "$PRE_UP_ENV" ]; then
+        COMPOSE+=(--env-file "$PRE_UP_ENV")
+    fi
+
     # Authenticate
     step "Authenticating"
     require_auth
@@ -1624,6 +1653,7 @@ case "$COMMAND" in
     HASH_FILE="$YOLO_DIR/$SAFE_NAME/.config-hash"
     HASH_FILES=("$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" "${USER_OVERRIDES[@]}")
     [ -n "${PROJECT_DOCKERFILE:-}" ] && HASH_FILES+=("$PROJECT_DOCKERFILE")
+    [ -f "${PRE_UP_ENV:-}" ] && HASH_FILES+=("$PRE_UP_ENV")
     CONFIG_HASH=$(cat "${HASH_FILES[@]}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
     STORED_HASH=""
     [ -f "$HASH_FILE" ] && STORED_HASH=$(cat "$HASH_FILE")
