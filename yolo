@@ -127,6 +127,11 @@ sed_escape() {
     printf '%s\n' "$1" | sed 's/[|&/\]/\\&/g'
 }
 
+# Docker Compose project names must be lowercase alphanumeric + hyphens/underscores
+compose_prefix() {
+    echo "yolo-$1-$2" | tr '[:upper:]' '[:lower:]'
+}
+
 transform_paths_for_container() {
     local input_file="$1"
     local output_file="$2"
@@ -996,7 +1001,7 @@ if [ "$COMMAND" = "ps" ]; then
         echo -e "${BOLD}${PROJECT}${RESET}"
 
         for safe in "${SESSIONS[@]}"; do
-            PREFIX="yolo-${PROJECT}-${safe}"
+            PREFIX="$(compose_prefix "$PROJECT" "$safe")"
             S_STATUS="stopped"
             CID=$(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml" ps -q claude 2>/dev/null) || true
             if [ -n "$CID" ]; then
@@ -1019,6 +1024,43 @@ if [ "$COMMAND" = "cleanup" ]; then
     YOLO_BASE="$YOLO_HOME"
     FOUND_ANY=false
 
+    # Helper: stop container and remove compose project
+    cleanup_stop() {
+        local prefix="$1" session_dir="$2"
+        local compose=(docker compose -p "$prefix" -f "$YOLO_LIB/docker-compose.yml")
+        local override="$session_dir/docker-compose.override.yml"
+        [ -f "$override" ] && compose+=(-f "$override")
+        "${compose[@]}" down >/dev/null 2>&1
+    }
+
+    # Helper: remove worktrees for a session, or just the session dir if no worktrees
+    cleanup_remove() {
+        local project_dir="$1" session_dir="$2" safe="$3" delete_branches="$4"
+        local local_sessions_json="$project_dir/sessions.json"
+
+        local is_worktree=false
+        if [ -f "$local_sessions_json" ] && command -v jq >/dev/null 2>&1 && \
+           jq -e --arg s "$safe" '.[$s] // empty | length > 0' "$local_sessions_json" >/dev/null 2>&1; then
+            is_worktree=true
+        fi
+
+        if [ "$is_worktree" = "true" ]; then
+            local repos
+            readarray -t repos < <(repos_from_sessions_json "$local_sessions_json" "$safe")
+            if [ ${#repos[@]} -gt 0 ]; then
+                local first_wt="$project_dir$safe/${repos[0]##*/}"
+                local sname="$safe"
+                if [ -d "$first_wt" ]; then
+                    sname=$(git -C "$first_wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || sname="$safe"
+                fi
+                YOLO_DIR="${project_dir%/}" remove_worktrees "$sname" "$safe" "$delete_branches" "${repos[@]}"
+            fi
+        else
+            rm -rf "$session_dir"
+        fi
+        rmdir "$project_dir" 2>/dev/null || true
+    }
+
     for project_dir in "$YOLO_BASE"/*/; do
         [ -d "$project_dir" ] || continue
         PROJECT=$(basename "$project_dir")
@@ -1029,7 +1071,7 @@ if [ "$COMMAND" = "cleanup" ]; then
             [ -d "$session_dir" ] || continue
             safe=$(basename "$session_dir")
 
-            PREFIX="yolo-${PROJECT}-${safe}"
+            PREFIX="$(compose_prefix "$PROJECT" "$safe")"
             CID=$(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml" ps -q claude 2>/dev/null) || true
 
             C_STATUS="none"
@@ -1045,19 +1087,14 @@ if [ "$COMMAND" = "cleanup" ]; then
                 fi
             fi
 
-            FOUND_ANY=true
-
-            # Determine display status
-            if [ "$C_STATUS" = "running" ]; then
-                STATUS_LABEL="running (detached)"
-            elif [ "$C_STATUS" = "none" ]; then
-                STATUS_LABEL="stopped (no container)"
-            else
-                STATUS_LABEL="stopped"
+            # Auto-remove empty session directories silently
+            if [ -z "$(ls -A "$session_dir" 2>/dev/null)" ]; then
+                rm -rf "$session_dir"
+                rmdir "$project_dir" 2>/dev/null || true
+                continue
             fi
 
-            echo ""
-            echo -e "${BOLD}${PROJECT}/${safe}${RESET}: ${STATUS_LABEL}"
+            FOUND_ANY=true
 
             # Check for worktree metadata
             local_sessions_json="$project_dir/sessions.json"
@@ -1065,22 +1102,38 @@ if [ "$COMMAND" = "cleanup" ]; then
             if [ -f "$local_sessions_json" ] && command -v jq >/dev/null 2>&1 && \
                jq -e --arg s "$safe" '.[$s] // empty | length > 0' "$local_sessions_json" >/dev/null 2>&1; then
                 IS_WORKTREE=true
+            fi
+
+            IS_RUNNING=false
+            [ "$C_STATUS" = "running" ] && IS_RUNNING=true
+
+            # Display header with status
+            if [ "$IS_RUNNING" = "true" ]; then
+                echo ""
+                echo -e "${BOLD}${PROJECT}/${safe}${RESET}: running (detached)"
+            elif [ "$IS_WORKTREE" = "true" ]; then
+                echo ""
+                echo -e "${BOLD}${PROJECT}/${safe}${RESET}: worktrees"
+            else
+                echo ""
+                echo -e "${BOLD}${PROJECT}/${safe}${RESET}: session data"
+            fi
+
+            # Show worktree details
+            if [ "$IS_WORKTREE" = "true" ]; then
                 wt_base="$project_dir$safe"
                 print_session_worktrees "$wt_base" "$safe" "  "
             fi
 
             # Build prompt based on session state
-            IS_RUNNING=false
-            [ "$C_STATUS" = "running" ] && IS_RUNNING=true
-
             if [ "$IS_RUNNING" = "true" ] && [ "$IS_WORKTREE" = "true" ]; then
-                echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op / stop+[${BOLD}c${RESET}]lean / stop+clean+[${BOLD}b${RESET}]ranches: "
+                echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op / stop+[${BOLD}r${RESET}]emove worktrees / stop+remove+delete [${BOLD}b${RESET}]ranches: "
             elif [ "$IS_RUNNING" = "true" ]; then
                 echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op: "
             elif [ "$IS_WORKTREE" = "true" ]; then
-                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}c${RESET}]lean / clean+[${BOLD}b${RESET}]ranches: "
+                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}r${RESET}]emove worktrees / remove+delete [${BOLD}b${RESET}]ranches: "
             else
-                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}c${RESET}]lean: "
+                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}r${RESET}]emove: "
             fi
             read -r choice
 
@@ -1089,67 +1142,22 @@ if [ "$COMMAND" = "cleanup" ]; then
                     if [ "$IS_RUNNING" = "false" ]; then
                         warn "Session not running — nothing to stop"
                     else
-                        COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
-                        OVERRIDE="$session_dir/docker-compose.override.yml"
-                        [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
-                        "${COMPOSE[@]}" down >/dev/null 2>&1
+                        cleanup_stop "$PREFIX" "$session_dir"
                         success "Stopped ${PROJECT}/${safe}"
                     fi
                     ;;
-                c|C)
-                    # Stop container if running
-                    COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
-                    OVERRIDE="$session_dir/docker-compose.override.yml"
-                    [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
-                    "${COMPOSE[@]}" down >/dev/null 2>&1
-
-                    # Remove worktrees if applicable
-                    if [ "$IS_WORKTREE" = "true" ]; then
-                        readarray -t REPOS < <(repos_from_sessions_json "$local_sessions_json" "$safe")
-                        if [ ${#REPOS[@]} -gt 0 ]; then
-                            first_wt="$project_dir$safe/${REPOS[0]##*/}"
-                            if [ -d "$first_wt" ]; then
-                                session_name=$(git -C "$first_wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || session_name="$safe"
-                            else
-                                session_name="$safe"
-                            fi
-                            YOLO_DIR="${project_dir%/}" remove_worktrees "$session_name" "$safe" false "${REPOS[@]}"
-                        fi
-                    else
-                        # No worktrees — just remove the session directory
-                        rm -rf "$session_dir"
-                        rmdir "$project_dir" 2>/dev/null || true
-                    fi
-                    success "Cleaned ${PROJECT}/${safe}"
+                r|R|c|C)
+                    cleanup_stop "$PREFIX" "$session_dir"
+                    cleanup_remove "$project_dir" "$session_dir" "$safe" false
+                    success "Removed ${PROJECT}/${safe}"
                     ;;
                 b|B)
                     if [ "$IS_WORKTREE" = "false" ]; then
-                        warn "Not a worktree session"
+                        warn "Not a worktree session — no branches to delete"
                     fi
-
-                    # Stop container if running
-                    COMPOSE=(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml")
-                    OVERRIDE="$session_dir/docker-compose.override.yml"
-                    [ -f "$OVERRIDE" ] && COMPOSE+=(-f "$OVERRIDE")
-                    "${COMPOSE[@]}" down >/dev/null 2>&1
-
-                    # Remove worktrees and branches
-                    if [ "$IS_WORKTREE" = "true" ]; then
-                        readarray -t REPOS < <(repos_from_sessions_json "$local_sessions_json" "$safe")
-                        if [ ${#REPOS[@]} -gt 0 ]; then
-                            first_wt="$project_dir$safe/${REPOS[0]##*/}"
-                            if [ -d "$first_wt" ]; then
-                                session_name=$(git -C "$first_wt" rev-parse --abbrev-ref HEAD 2>/dev/null) || session_name="$safe"
-                            else
-                                session_name="$safe"
-                            fi
-                            YOLO_DIR="${project_dir%/}" remove_worktrees "$session_name" "$safe" true "${REPOS[@]}"
-                        fi
-                    else
-                        rm -rf "$session_dir"
-                        rmdir "$project_dir" 2>/dev/null || true
-                    fi
-                    success "Cleaned and deleted branches for ${PROJECT}/${safe}"
+                    cleanup_stop "$PREFIX" "$session_dir"
+                    cleanup_remove "$project_dir" "$session_dir" "$safe" true
+                    success "Removed ${PROJECT}/${safe} and deleted branches"
                     ;;
                 *)
                     info "Skipped ${PROJECT}/${safe}"
@@ -1159,7 +1167,7 @@ if [ "$COMMAND" = "cleanup" ]; then
     done
 
     if [ "$FOUND_ANY" = "false" ]; then
-        info "No sessions to clean up"
+        info "Nothing to clean up"
     fi
     exit 0
 fi
@@ -1212,7 +1220,7 @@ if [ "$COMMAND" = "status" ]; then
 
     if [ -n "$SESSION_NAME" ]; then
         SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
-        CONTAINER_PREFIX="yolo-${PROJECT_BASE}-${SAFE_NAME}"
+        CONTAINER_PREFIX="$(compose_prefix "$PROJECT_BASE" "$SAFE_NAME")"
         COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml")
 
         CONTAINER=$("${COMPOSE[@]}" ps -q claude 2>/dev/null) || true
@@ -1256,7 +1264,7 @@ if [ "$COMMAND" = "status" ]; then
                 [ -d "$session_dir" ] || continue
                 safe=$(basename "$session_dir")
                 FOUND_ANY=true
-                PREFIX="yolo-${PROJECT_BASE}-${safe}"
+                PREFIX="$(compose_prefix "$PROJECT_BASE" "$safe")"
                 S_STATUS="stopped"
                 CID=$(docker compose -p "$PREFIX" -f "$YOLO_LIB/docker-compose.yml" ps -q claude 2>/dev/null) || true
                 if [ -n "$CID" ]; then
@@ -1400,7 +1408,7 @@ done
 SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
 PROJECT_DIR="$(pwd)"
 PROJECT_BASE="$(basename "$PROJECT_DIR")"
-CONTAINER_PREFIX="yolo-${PROJECT_BASE}-${SAFE_NAME}"
+CONTAINER_PREFIX="$(compose_prefix "$PROJECT_BASE" "$SAFE_NAME")"
 YOLO_DIR="$YOLO_HOME/$PROJECT_BASE"
 
 export HOST_HOME="$YOLO_HOST_HOME"
