@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Test mount mode parsing from ~/.yolo/mounts.
-# Verifies :ro/:rw suffix detection, comment stripping, whitespace handling.
+# Test mount parsing from mounts files.
+# Verifies :ro/:rw suffix, comment stripping, whitespace, custom container
+# paths, and per-project mounts.
 # Usage: ./test/test-mounts.sh
 set -euo pipefail
 
@@ -19,7 +20,7 @@ trap "rm -rf '$TMPDIR'" EXIT
 
 # Create real directories so the -e check passes
 mkdir -p "$TMPDIR/bare-path" "$TMPDIR/rw-path" "$TMPDIR/ro-path" \
-         "$TMPDIR/comment-path" "$TMPDIR/ws-path"
+         "$TMPDIR/comment-path" "$TMPDIR/ws-path" "$TMPDIR/cache-m2"
 
 # ─── Helper: run the parsing logic against a mounts file ─────────────────────
 
@@ -43,10 +44,17 @@ parse_mounts() {
         fi
         # Trim trailing whitespace from path (handles "~/path :rw")
         mount_path="${mount_path%"${mount_path##*[! ]}"}"
+        # Check for explicit container path (host:/container format)
+        container_path=""
+        if [[ "$mount_path" == *:/* ]]; then
+            container_path="${mount_path#*:}"
+            mount_path="${mount_path%%:*}"
+        fi
         # Expand ~ to $HOME
         mount_path="${mount_path/#\~/$HOME}"
+        [ -z "$container_path" ] && container_path="$mount_path"
         if [ -e "$mount_path" ]; then
-            MOUNTS+=("${mount_path}:${mount_path}:${mode}")
+            MOUNTS+=("${mount_path}:${container_path}:${mode}")
         fi
     done < "$mounts_file"
 
@@ -135,6 +143,46 @@ if [[ "$count" -eq 1 ]]; then
     pass "Blank lines and comments are skipped"
 else
     fail "Blank lines and comments are skipped — got $count mounts"
+fi
+
+# ─── Custom container path ──────────────────────────────────────────────────
+
+echo -e "\n${BOLD}Custom container path${RESET}"
+
+# 9. Absolute host path with custom container path
+echo "$TMPDIR/cache-m2:/home/claude/.m2:rw" > "$TMPDIR/mounts"
+result=$(parse_mounts "$TMPDIR/mounts")
+if [[ "$result" == "$TMPDIR/cache-m2:/home/claude/.m2:rw" ]]; then
+    pass "Custom container path with :rw"
+else
+    fail "Custom container path with :rw — got: $result"
+fi
+
+# 10. Tilde host path with custom container path
+echo "~/cache-m2:/home/claude/.m2:rw" > "$TMPDIR/mounts"
+result=$(parse_mounts "$TMPDIR/mounts")
+if [[ "$result" == "$TMPDIR/cache-m2:/home/claude/.m2:rw" ]]; then
+    pass "Tilde host + custom container path"
+else
+    fail "Tilde host + custom container path — got: $result"
+fi
+
+# 11. Custom container path defaults to :ro
+echo "$TMPDIR/cache-m2:/home/claude/.m2" > "$TMPDIR/mounts"
+result=$(parse_mounts "$TMPDIR/mounts")
+if [[ "$result" == "$TMPDIR/cache-m2:/home/claude/.m2:ro" ]]; then
+    pass "Custom container path defaults to :ro"
+else
+    fail "Custom container path defaults to :ro — got: $result"
+fi
+
+# 12. Custom container path with comment
+echo "$TMPDIR/cache-m2:/home/claude/.m2:rw  # maven cache" > "$TMPDIR/mounts"
+result=$(parse_mounts "$TMPDIR/mounts")
+if [[ "$result" == "$TMPDIR/cache-m2:/home/claude/.m2:rw" ]]; then
+    pass "Custom container path with comment"
+else
+    fail "Custom container path with comment — got: $result"
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
