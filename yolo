@@ -669,6 +669,30 @@ remove_worktrees() {
     success "Worktrees removed"
 }
 
+# ─── SSH Agent Forwarding ────────────────────────────────────────────────────
+
+# On macOS, load SSH keys from Keychain into the standard agent so Docker
+# Desktop can forward them into containers.  Also adds the Docker Desktop
+# SSH-agent socket to the MOUNTS array and records that forwarding is active.
+SSH_AGENT_FORWARDED=false
+
+ensure_host_ssh_agent() {
+    [ "$(uname)" = "Darwin" ] || return 0
+
+    # Load keys from Keychain into the standard macOS agent
+    for key in "$YOLO_HOST_HOME"/.ssh/id_*; do
+        [ -f "$key" ] || continue
+        [[ "$key" == *.pub ]] && continue
+        ssh-add --apple-use-keychain "$key" 2>/dev/null || true
+    done
+
+    # Verify at least one key is now available
+    if ssh-add -l >/dev/null 2>&1; then
+        MOUNTS+=("/run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock")
+        SSH_AGENT_FORWARDED=true
+    fi
+}
+
 # ─── Compose Override Generation ──────────────────────────────────────────────
 
 generate_compose_override() {
@@ -690,6 +714,10 @@ generate_compose_override() {
             for port in "${PORTS[@]}"; do
                 echo "      - \"${port}:${port}\""
             done
+        fi
+        if [ "${SSH_AGENT_FORWARDED:-false}" = "true" ]; then
+            echo "    environment:"
+            echo "      SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock"
         fi
     } > "$override_file"
 }
@@ -1127,13 +1155,13 @@ if [ "$COMMAND" = "cleanup" ]; then
 
             # Build prompt based on session state
             if [ "$IS_RUNNING" = "true" ] && [ "$IS_WORKTREE" = "true" ]; then
-                echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op / stop+[${BOLD}r${RESET}]emove worktrees / stop+remove+delete [${BOLD}b${RESET}]ranches: "
+                echo -ne "  [${BOLD}S${RESET}]kip / s[${BOLD}t${RESET}]op / stop+[${BOLD}r${RESET}]emove worktrees / stop+remove+delete [${BOLD}b${RESET}]ranches: "
             elif [ "$IS_RUNNING" = "true" ]; then
-                echo -ne "  [${BOLD}s${RESET}]kip / s[${BOLD}t${RESET}]op: "
+                echo -ne "  [${BOLD}S${RESET}]kip / s[${BOLD}t${RESET}]op: "
             elif [ "$IS_WORKTREE" = "true" ]; then
-                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}r${RESET}]emove worktrees / remove+delete [${BOLD}b${RESET}]ranches: "
+                echo -ne "  [${BOLD}S${RESET}]kip / [${BOLD}r${RESET}]emove worktrees / remove+delete [${BOLD}b${RESET}]ranches: "
             else
-                echo -ne "  [${BOLD}s${RESET}]kip / [${BOLD}r${RESET}]emove: "
+                echo -ne "  [${BOLD}S${RESET}]kip / [${BOLD}r${RESET}]emove: "
             fi
             read -r choice
 
@@ -1538,6 +1566,9 @@ case "$COMMAND" in
 
     # Mount .yolo directory at host path (inner yolo needs it for worktree/session state)
     MOUNTS+=("$YOLO_HOME:$YOLO_HOME")
+
+    # SSH agent forwarding (macOS → Docker Desktop)
+    ensure_host_ssh_agent
 
     # Generate compose override
     generate_compose_override "$OVERRIDE_FILE" "${MOUNTS[@]}"

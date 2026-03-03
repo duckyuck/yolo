@@ -73,6 +73,27 @@ else
     fail "Volumes still present alongside ports — got: $(cat "$OVERRIDE")"
 fi
 
+# 6. SSH_AUTH_SOCK added when SSH_AGENT_FORWARDED=true
+PORTS=()
+SSH_AGENT_FORWARDED=true
+OVERRIDE="$TMPDIR/ssh-forwarded.yml"
+generate_compose_override "$OVERRIDE" "/host:/container"
+if grep -q 'SSH_AUTH_SOCK' "$OVERRIDE" && grep -q '/run/host-services/ssh-auth.sock' "$OVERRIDE"; then
+    pass "SSH_AUTH_SOCK env var added when agent forwarded"
+else
+    fail "SSH_AUTH_SOCK env var added when agent forwarded — got: $(cat "$OVERRIDE")"
+fi
+
+# 7. SSH_AUTH_SOCK not added when SSH_AGENT_FORWARDED=false
+SSH_AGENT_FORWARDED=false
+OVERRIDE="$TMPDIR/ssh-not-forwarded.yml"
+generate_compose_override "$OVERRIDE" "/host:/container"
+if ! grep -q 'SSH_AUTH_SOCK' "$OVERRIDE"; then
+    pass "No SSH_AUTH_SOCK when agent not forwarded"
+else
+    fail "No SSH_AUTH_SOCK when agent not forwarded — got: $(cat "$OVERRIDE")"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""

@@ -27,6 +27,7 @@ CONTAINER=""
 
 cleanup() {
     [ -n "$CONTAINER" ] && docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    [ -n "${FORWARDED_CONTAINER:-}" ] && docker rm -f "$FORWARDED_CONTAINER" >/dev/null 2>&1 || true
     docker rmi "$TEST_IMAGE" >/dev/null 2>&1 || true
     rm -rf "$TMPDIR"
 }
@@ -194,6 +195,77 @@ if docker exec "$CONTAINER" test -f /home/claude/.ssh/agent.env 2>/dev/null; the
     pass "Agent env file written"
 else
     fail "Agent env file should exist"
+fi
+
+# Agent env file points to local agent (no forwarded agent available in this test)
+AGENT_ENV=$(docker exec "$CONTAINER" cat /home/claude/.ssh/agent.env 2>/dev/null) || true
+if [[ "$AGENT_ENV" == *"/home/claude/.ssh/agent.sock"* ]]; then
+    pass "Agent env uses local agent (no forwarded agent)"
+else
+    fail "Agent env should use local agent — got: $AGENT_ENV"
+fi
+
+# ─── Forwarded SSH agent (Docker Desktop, macOS only) ───────────────────────
+
+# Test that the entrypoint prefers a forwarded host agent when available.
+# Only runs on macOS with Docker Desktop (requires /run/host-services/ssh-auth.sock).
+
+FORWARDED_CONTAINER=""
+if [ "$(uname)" = "Darwin" ] && ssh-add -l >/dev/null 2>&1; then
+    echo -e "\n${BOLD}Forwarded SSH agent${RESET}"
+
+    FORWARDED_CONTAINER=$(docker run -d \
+        -v "$MOCK_SSH:/mnt/host-ssh:ro" \
+        -v "$MOCK_CLAUDE:/mnt/host-claude:ro" \
+        -v "$MOCK_HOME/.claude.json:/mnt/host-claude.json:ro" \
+        -v "$MOCK_CLAUDE/.credentials.json:/home/claude/.claude/.credentials.json" \
+        -v "$WORKDIR:$WORKDIR" \
+        -v /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock \
+        -e SSH_AUTH_SOCK=/run/host-services/ssh-auth.sock \
+        -e WORKDIR="$WORKDIR" \
+        -e SESSION_NAME="test-fwd" \
+        -e HOST_HOME="$MOCK_HOME" \
+        -e CLAUDE_MODEL="claude-opus-4-6" \
+        "$TEST_IMAGE"
+    )
+
+    # Wait for entrypoint to finish
+    FWD_READY=false
+    for i in $(seq 1 30); do
+        if docker exec "$FORWARDED_CONTAINER" tmux has-session -t "test-fwd" 2>/dev/null; then
+            FWD_READY=true
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [ "$FWD_READY" = "true" ]; then
+        # Agent env should point to the forwarded socket
+        FWD_AGENT_ENV=$(docker exec "$FORWARDED_CONTAINER" cat /home/claude/.ssh/agent.env 2>/dev/null) || true
+        if [[ "$FWD_AGENT_ENV" == *"/run/host-services/ssh-auth.sock"* ]]; then
+            pass "Forwarded agent preferred over local agent"
+        else
+            fail "Forwarded agent preferred over local agent — got: $FWD_AGENT_ENV"
+        fi
+
+        # Keys accessible via forwarded agent
+        FWD_KEYS=$(docker exec "$FORWARDED_CONTAINER" bash -c 'source ~/.ssh/agent.env && ssh-add -l 2>&1') || true
+        if [[ "$FWD_KEYS" != *"no identities"* ]] && [[ "$FWD_KEYS" != *"Could not"* ]]; then
+            pass "Keys accessible via forwarded agent"
+        else
+            fail "Keys should be accessible via forwarded agent — got: $FWD_KEYS"
+        fi
+
+        # Private keys still deleted from disk
+        if docker exec "$FORWARDED_CONTAINER" test -f /home/claude/.ssh/id_ed25519 2>/dev/null; then
+            fail "Private key should be deleted even with forwarded agent"
+        else
+            pass "Private key deleted with forwarded agent"
+        fi
+    else
+        fail "Forwarded agent container did not start tmux session"
+        docker logs "$FORWARDED_CONTAINER" 2>&1 | tail -10 | sed 's/^/    /'
+    fi
 fi
 
 # ─── Claude config ────────────────────────────────────────────────────────────

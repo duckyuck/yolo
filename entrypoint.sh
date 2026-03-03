@@ -27,8 +27,9 @@ if [ -S /var/run/docker.sock ] && ! docker info >/dev/null 2>&1; then
 fi
 
 # --- SSH setup ---
-# Load SSH keys into an agent so git can authenticate, then delete the key files.
-# This prevents Claude from reading private key material while still allowing git operations.
+# Authenticate git via SSH agent. Prefers the host agent forwarded by Docker
+# Desktop (works with 1Password, Keychain, etc.). Falls back to a local
+# ssh-agent for unencrypted keys. Private key files are always deleted.
 if [ -d /mnt/host-ssh ]; then
     mkdir -p /home/claude/.ssh
     chmod 700 /home/claude/.ssh
@@ -52,25 +53,35 @@ if [ -d /mnt/host-ssh ]; then
         chmod 600 /home/claude/.ssh/config
     fi
 
-    # Start ssh-agent at a fixed socket path so all processes can find it
-    SSH_SOCK="/home/claude/.ssh/agent.sock"
-    rm -f "$SSH_SOCK"
-    eval "$(ssh-agent -a "$SSH_SOCK" -s)" > /dev/null
-    export SSH_AUTH_SOCK="$SSH_SOCK"
-    export SSH_AGENT_PID
+    # Choose SSH agent: prefer forwarded host agent, fall back to local
+    FORWARDED_AGENT="/run/host-services/ssh-auth.sock"
+    # Docker Desktop's forwarded socket is typically root:root 660 — make it accessible
+    if [ -S "$FORWARDED_AGENT" ] && ! SSH_AUTH_SOCK="$FORWARDED_AGENT" ssh-add -l >/dev/null 2>&1; then
+        sudo chmod 666 "$FORWARDED_AGENT" 2>/dev/null || true
+    fi
+    if [ -S "$FORWARDED_AGENT" ] && SSH_AUTH_SOCK="$FORWARDED_AGENT" ssh-add -l >/dev/null 2>&1; then
+        # Host SSH agent forwarded via Docker Desktop — use it directly
+        export SSH_AUTH_SOCK="$FORWARDED_AGENT"
+    else
+        # Start local ssh-agent at a fixed socket path
+        SSH_SOCK="/home/claude/.ssh/agent.sock"
+        rm -f "$SSH_SOCK"
+        eval "$(ssh-agent -a "$SSH_SOCK" -s)" > /dev/null
+        export SSH_AUTH_SOCK="$SSH_SOCK"
+        export SSH_AGENT_PID
 
-    # Load private keys into agent (skip passphrase-protected keys)
-    for key in /home/claude/.ssh/id_*; do
-        [ -f "$key" ] || continue
-        [[ "$key" == *.pub ]] && continue
-        chmod 600 "$key"
-        # Test if key is unencrypted (ssh-keygen -y -P "" fails on encrypted keys)
-        if ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1; then
-            ssh-add "$key" 2>/dev/null || true
-        fi
-    done
+        # Load private keys into agent (skip passphrase-protected keys)
+        for key in /home/claude/.ssh/id_*; do
+            [ -f "$key" ] || continue
+            [[ "$key" == *.pub ]] && continue
+            chmod 600 "$key"
+            if ssh-keygen -y -P "" -f "$key" >/dev/null 2>&1; then
+                ssh-add "$key" 2>/dev/null || true
+            fi
+        done
+    fi
 
-    # Delete private key files — agent holds them in memory
+    # Delete private key files — agent holds them in memory (or host agent is forwarded)
     for key in /home/claude/.ssh/id_*; do
         [ -f "$key" ] || continue
         [[ "$key" == *.pub ]] && continue
@@ -79,9 +90,9 @@ if [ -d /mnt/host-ssh ]; then
 
     # Write env vars so docker exec / interactive shells pick up the agent
     cat > /home/claude/.ssh/agent.env <<AGENTEOF
-export SSH_AUTH_SOCK="$SSH_SOCK"
-export SSH_AGENT_PID="$SSH_AGENT_PID"
+export SSH_AUTH_SOCK="$SSH_AUTH_SOCK"
 AGENTEOF
+    [ -n "${SSH_AGENT_PID:-}" ] && echo "export SSH_AGENT_PID=\"$SSH_AGENT_PID\"" >> /home/claude/.ssh/agent.env
 
     # Source agent env in all new bash sessions (login and non-login)
     AGENT_SOURCE='[ -f ~/.ssh/agent.env ] && source ~/.ssh/agent.env'
@@ -173,11 +184,12 @@ CLAUDE_MODEL="${CLAUDE_MODEL:-claude-opus-4-6}"
 # Kill any stale session from a previous run
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
-# Pass SSH_AUTH_SOCK into tmux so git works inside all windows
+tmux new-session -d -s "$SESSION" -n claude -c "${WORKDIR}"
+
+# Pass SSH_AUTH_SOCK into tmux so git works inside new windows/panes
+# (must be after new-session to ensure tmux server is running)
 tmux set-environment -g SSH_AUTH_SOCK "${SSH_AUTH_SOCK:-}" 2>/dev/null || true
 tmux set-environment -g SSH_AGENT_PID "${SSH_AGENT_PID:-}" 2>/dev/null || true
-
-tmux new-session -d -s "$SESSION" -n claude -c "${WORKDIR}"
 CLAUDE_CMD="claude --dangerously-skip-permissions --model ${CLAUDE_MODEL}"
 # Auto-continue if conversation history exists from a previous run
 if find /home/claude/.claude/projects -mindepth 1 -type f -print -quit 2>/dev/null | grep -q .; then
