@@ -760,6 +760,8 @@ sync_config_to_container() {
         # Resolve symlinked skills (symlinks to host paths break inside the container)
         if [ -d "$HOME/.claude/skills" ] \
             && find "$HOME/.claude/skills" -maxdepth 1 -type l -print -quit | grep -q .; then
+            # Remove broken symlinks inside the container first (docker cp can't overwrite symlinks with dirs)
+            docker exec "$container" find /home/claude/.claude/skills -maxdepth 1 -type l -delete 2>/dev/null || true
             local temp_skills="/tmp/yolo-${SAFE_NAME}-skills-resolved"
             rm -rf "$temp_skills"
             cp -rL "$HOME/.claude/skills" "$temp_skills" 2>/dev/null || true

@@ -234,6 +234,8 @@ else
 fi
 
 # Simulate sync_config_to_container's symlink resolution step
+# Remove broken symlinks first (docker cp can't overwrite symlinks with dirs)
+docker exec "$CONTAINER" find /home/claude/.claude/skills -maxdepth 1 -type l -delete 2>/dev/null || true
 TEMP_SKILLS="$TMPDIR/skills-resolved"
 rm -rf "$TEMP_SKILLS"
 cp -rL "$MOCK_CLAUDE/skills" "$TEMP_SKILLS" 2>/dev/null || true
