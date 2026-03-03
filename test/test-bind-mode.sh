@@ -609,7 +609,7 @@ UNKNOWN_FLAG_OUTPUT=$(
         '
 ) 2>&1
 
-if [[ "$UNKNOWN_FLAG_OUTPUT" == *"CORRECTLY_FAILED"* ]] && [[ "$UNKNOWN_FLAG_OUTPUT" == *"unknown flag"* ]]; then
+if [[ "$UNKNOWN_FLAG_OUTPUT" == *"CORRECTLY_FAILED"* ]] && [[ "${UNKNOWN_FLAG_OUTPUT,,}" == *"unknown flag"* ]]; then
     pass "Unknown flag --workstree is rejected"
 else
     fail "Unknown flags should be rejected — got:\n$(echo "$UNKNOWN_FLAG_OUTPUT" | tail -5)"

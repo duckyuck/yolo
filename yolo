@@ -30,7 +30,7 @@ for arg in "$@"; do
     case "$arg" in
         --verbose|-v) VERBOSE=true ;;
         --worktree) WORKTREE_MODE=true ;;
-        --*) echo "Error: unknown flag '$arg'" >&2; exit 1 ;;
+        --*) ;;  # skip command-specific flags; validated later per command
     esac
 done
 
