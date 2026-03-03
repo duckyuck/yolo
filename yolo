@@ -705,6 +705,11 @@ generate_compose_override() {
     {
         echo "services:"
         echo "  claude:"
+        if [ -n "${PROJECT_DOCKERFILE:-}" ]; then
+            echo "    build:"
+            echo "      context: $(dirname "$PROJECT_DOCKERFILE")"
+            echo "      dockerfile: Dockerfile"
+        fi
         echo "    volumes:"
         for mount in "${mounts[@]}"; do
             echo "      - ${mount}"
@@ -1570,8 +1575,34 @@ case "$COMMAND" in
     # SSH agent forwarding (macOS → Docker Desktop)
     ensure_host_ssh_agent
 
+    # Detect per-project Dockerfile
+    if [ -f "$PROJECT_DIR/.yolo/Dockerfile" ]; then
+        export PROJECT_DOCKERFILE="$PROJECT_DIR/.yolo/Dockerfile"
+    fi
+
     # Generate compose override
     generate_compose_override "$OVERRIDE_FILE" "${MOUNTS[@]}"
+
+    # Build base image when project Dockerfile needs it
+    if [ -n "${PROJECT_DOCKERFILE:-}" ]; then
+        step "Building base image"
+        BASE_BUILD_ARGS=(
+            --build-arg "HOST_UID=$HOST_UID"
+            --build-arg "HOST_GID=$HOST_GID"
+        )
+        [ -n "${CLAUDE_VERSION:-}" ] && BASE_BUILD_ARGS+=(--build-arg "CLAUDE_VERSION=$CLAUDE_VERSION")
+        if [ "$VERBOSE" = "true" ]; then
+            docker build -t yolo-base "${BASE_BUILD_ARGS[@]}" -f "$YOLO_LIB/Dockerfile" "$YOLO_LIB"
+        else
+            BASE_BUILD_LOG="$YOLO_TMPDIR/base-build-log"
+            if ! docker build -t yolo-base "${BASE_BUILD_ARGS[@]}" -f "$YOLO_LIB/Dockerfile" "$YOLO_LIB" >"$BASE_BUILD_LOG" 2>&1; then
+                error "Base image build failed:"
+                tail -20 "$BASE_BUILD_LOG" | sed 's/^/  /'
+                exit 1
+            fi
+        fi
+        success "Base image ready"
+    fi
 
     COMPOSE=(docker compose -p "$CONTAINER_PREFIX" -f "$YOLO_LIB/docker-compose.yml" -f "$OVERRIDE_FILE")
 
@@ -1591,7 +1622,9 @@ case "$COMMAND" in
 
     # Detect config changes via file hash (fast — avoids slow docker compose up)
     HASH_FILE="$YOLO_DIR/$SAFE_NAME/.config-hash"
-    CONFIG_HASH=$(cat "$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" "${USER_OVERRIDES[@]}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
+    HASH_FILES=("$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" "${USER_OVERRIDES[@]}")
+    [ -n "${PROJECT_DOCKERFILE:-}" ] && HASH_FILES+=("$PROJECT_DOCKERFILE")
+    CONFIG_HASH=$(cat "${HASH_FILES[@]}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
     STORED_HASH=""
     [ -f "$HASH_FILE" ] && STORED_HASH=$(cat "$HASH_FILE")
 
