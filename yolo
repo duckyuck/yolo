@@ -327,47 +327,47 @@ start_credential_sync() {
 
     mkdir -p "$YOLO_HOME"
 
-    # Already running?
+    # Already running? Validate PID is actually our daemon (not a reused PID).
     if [ -f "$CREDENTIAL_SYNC_PIDFILE" ]; then
         local pid
         pid=$(cat "$CREDENTIAL_SYNC_PIDFILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null \
+                && ps -p "$pid" -o command= 2>/dev/null | grep -q "yolo-credential-sync"; then
             return 0
         fi
         rm -f "$CREDENTIAL_SYNC_PIDFILE"
     fi
 
-    (
-        # Detach from parent — survive terminal close
-        trap 'rm -f "$CREDENTIAL_SYNC_PIDFILE"' EXIT
-
-        while true; do
-            sleep "$CREDENTIAL_SYNC_INTERVAL"
-
-            # Exit if no yolo containers are running
-            if ! docker ps --filter "label=com.docker.compose.service=claude" \
-                    --filter "name=yolo-" --format '{{.ID}}' 2>/dev/null | grep -q .; then
-                break
-            fi
-
-            # Refresh token if near expiry (within 10 minutes)
-            local creds_file="$YOLO_HOST_HOME/.claude/.credentials.json"
-            if [ -f "$creds_file" ]; then
-                local expires_at now_ms margin_ms
-                expires_at=$(jq -r '.claudeAiOauth.expiresAt // 0' "$creds_file" 2>/dev/null)
-                now_ms=$(($(date +%s) * 1000))
-                margin_ms=600000  # 10 minutes
-                if [ "$((expires_at - now_ms))" -lt "$margin_ms" ] 2>/dev/null; then
-                    if command -v claude >/dev/null 2>&1; then
-                        claude auth status >/dev/null 2>&1 || true
+    # Launch as a detached bash script so the process has a recognizable name
+    bash -c '
+        exec -a yolo-credential-sync bash -c '\''
+            trap "rm -f \"'"$CREDENTIAL_SYNC_PIDFILE"'\"" EXIT
+            while true; do
+                sleep '"$CREDENTIAL_SYNC_INTERVAL"'
+                # Exit if no yolo containers are running
+                if ! docker ps --filter "label=com.docker.compose.service=claude" \
+                        --filter "name=yolo-" --format "{{.ID}}" 2>/dev/null | grep -q .; then
+                    break
+                fi
+                # Refresh token if near expiry (within 10 minutes)
+                creds_file="'"$YOLO_HOST_HOME"'/.claude/.credentials.json"
+                if [ -f "$creds_file" ]; then
+                    expires_at=$(jq -r ".claudeAiOauth.expiresAt // 0" "$creds_file" 2>/dev/null)
+                    now_ms=$(($(date +%s) * 1000))
+                    if [ "$((expires_at - now_ms))" -lt 600000 ] 2>/dev/null; then
+                        if command -v claude >/dev/null 2>&1; then
+                            claude auth status >/dev/null 2>&1 || true
+                        fi
                     fi
                 fi
-            fi
-
-            # Mirror Keychain → file
-            extract_keychain_credentials 2>/dev/null || true
-        done
-    ) &
+                # Mirror Keychain → file
+                security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null > "$creds_file.tmp" \
+                    && [ -s "$creds_file.tmp" ] && mv "$creds_file.tmp" "$creds_file" \
+                    || rm -f "$creds_file.tmp"
+            done
+        '\''
+    ' &
+    disown
     echo $! > "$CREDENTIAL_SYNC_PIDFILE"
 }
 
@@ -1464,6 +1464,17 @@ done
 
 SAFE_NAME="$(echo "$SESSION_NAME" | tr '/' '-')"
 PROJECT_DIR="$(pwd)"
+
+# Load ports from .yolo/ports (one port or range per line, merged with --port flags)
+if [ -f "$PROJECT_DIR/.yolo/ports" ]; then
+    while IFS= read -r port_line || [ -n "$port_line" ]; do
+        port_line="${port_line%%#*}"                                        # strip comments
+        port_line="${port_line%"${port_line##*[![:space:]]}"}"              # trim trailing whitespace
+        port_line="${port_line#"${port_line%%[![:space:]]*}"}"              # trim leading whitespace
+        [ -z "$port_line" ] && continue
+        PORTS+=("$port_line")
+    done < "$PROJECT_DIR/.yolo/ports"
+fi
 PROJECT_BASE="$(basename "$PROJECT_DIR")"
 CONTAINER_PREFIX="$(compose_prefix "$PROJECT_BASE" "$SAFE_NAME")"
 YOLO_DIR="$YOLO_HOME/$PROJECT_BASE"
@@ -1665,6 +1676,7 @@ case "$COMMAND" in
     HASH_FILES=("$YOLO_LIB/docker-compose.yml" "$OVERRIDE_FILE" "$YOLO_LIB/Dockerfile" "$YOLO_LIB/entrypoint.sh" "$YOLO_LIB/tmux.conf" "${USER_OVERRIDES[@]}")
     [ -n "${PROJECT_DOCKERFILE:-}" ] && HASH_FILES+=("$PROJECT_DOCKERFILE")
     [ -f "$PROJECT_DIR/.yolo/mounts" ] && HASH_FILES+=("$PROJECT_DIR/.yolo/mounts")
+    [ -f "$PROJECT_DIR/.yolo/ports" ] && HASH_FILES+=("$PROJECT_DIR/.yolo/ports")
     [ -f "${PRE_UP_ENV:-}" ] && HASH_FILES+=("$PRE_UP_ENV")
     CONFIG_HASH=$(cat "${HASH_FILES[@]}" 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
     STORED_HASH=""

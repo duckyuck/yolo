@@ -94,6 +94,92 @@ else
     fail "No SSH_AUTH_SOCK when agent not forwarded — got: $(cat "$OVERRIDE")"
 fi
 
+# ─── .yolo/ports file parsing ────────────────────────────────────────────────
+
+echo -e "\n${BOLD}.yolo/ports file parsing${RESET}"
+
+# Helper: parse a ports file using the same logic as yolo
+parse_ports() {
+    local ports_file="$1"
+    local PORTS=()
+    while IFS= read -r port_line || [ -n "$port_line" ]; do
+        port_line="${port_line%%#*}"
+        port_line="${port_line%"${port_line##*[![:space:]]}"}"
+        port_line="${port_line#"${port_line%%[![:space:]]*}"}"
+        [ -z "$port_line" ] && continue
+        PORTS+=("$port_line")
+    done < "$ports_file"
+    printf '%s\n' "${PORTS[@]}"
+}
+
+# 8. Basic port list
+cat > "$TMPDIR/ports" <<'EOF'
+4000
+4001
+5100
+EOF
+result=$(parse_ports "$TMPDIR/ports")
+expected=$'4000\n4001\n5100'
+if [ "$result" = "$expected" ]; then
+    pass "Basic port list parsed"
+else
+    fail "Basic port list — got: $result"
+fi
+
+# 9. Comments and blank lines skipped
+cat > "$TMPDIR/ports" <<'EOF'
+# Ory tunnels
+4000
+4001
+
+# Frontend
+5100
+5101
+EOF
+result=$(parse_ports "$TMPDIR/ports")
+expected=$'4000\n4001\n5100\n5101'
+if [ "$result" = "$expected" ]; then
+    pass "Comments and blank lines skipped"
+else
+    fail "Comments and blank lines — got: $result"
+fi
+
+# 10. Port ranges
+cat > "$TMPDIR/ports" <<'EOF'
+3000-3999
+8080
+EOF
+result=$(parse_ports "$TMPDIR/ports")
+expected=$'3000-3999\n8080'
+if [ "$result" = "$expected" ]; then
+    pass "Port ranges preserved"
+else
+    fail "Port ranges — got: $result"
+fi
+
+# 11. Inline comments stripped
+cat > "$TMPDIR/ports" <<'EOF'
+5100  # buyer frontend
+5101  # supplier frontend
+EOF
+result=$(parse_ports "$TMPDIR/ports")
+expected=$'5100\n5101'
+if [ "$result" = "$expected" ]; then
+    pass "Inline comments stripped"
+else
+    fail "Inline comments — got: $result"
+fi
+
+# 12. Leading/trailing whitespace trimmed
+printf '  4000  \n\t5100\t\n' > "$TMPDIR/ports"
+result=$(parse_ports "$TMPDIR/ports")
+expected=$'4000\n5100'
+if [ "$result" = "$expected" ]; then
+    pass "Whitespace trimmed"
+else
+    fail "Whitespace trimmed — got: $result"
+fi
+
 # ─── Summary ─────────────────────────────────────────────────────────────────
 
 echo ""
