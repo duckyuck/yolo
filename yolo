@@ -513,11 +513,12 @@ repos_from_sessions_json() {
 }
 
 # Record worktree-to-source-repo mapping in sessions.json.
-# Usage: update_sessions_json <yolo_dir> <safe_name> <repo_path>...
+# Usage: update_sessions_json <yolo_dir> <safe_name> <project_dir> <repo_path>...
 update_sessions_json() {
     local yolo_dir="$1"
     local safe_name="$2"
-    shift 2
+    local project_dir="$3"
+    shift 3
     local repos=("$@")
 
     local sessions_json="$yolo_dir/sessions.json"
@@ -525,6 +526,11 @@ update_sessions_json() {
 
     local json="{}"
     [ -f "$sessions_json" ] && json=$(cat "$sessions_json")
+
+    # Store project_dir for cross-project discovery
+    json=$(echo "$json" | jq --arg s "$safe_name" --arg pd "$project_dir" \
+        '.[$s].project_dir = $pd')
+
     for repo_path in "${repos[@]}"; do
         local repo_name
         repo_name=$(basename "$repo_path")
@@ -1554,7 +1560,7 @@ case "$COMMAND" in
             esac
         done < "$WT_STDERR"
         export WORKDIR="$WORKTREE_PATH"
-        update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "${REPOS[@]}"
+        update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "$PROJECT_DIR" "${REPOS[@]}"
 
         readarray -t MOUNTS < <(resolve_git_mounts "$PROJECT_DIR" "$SAFE_NAME" "${REPOS[@]}")
     else
