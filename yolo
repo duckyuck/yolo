@@ -454,7 +454,8 @@ resolve_git_mounts() {
     shift 2
     local repos=("$@")
 
-    local session_base="$YOLO_DIR/$safe_name"
+    # Use real worktree path for Docker (symlinks don't work as volume sources)
+    local session_base="${YOLO_WORKTREE_BASE:-$YOLO_DIR/$safe_name}"
     local mounts=()
 
     # Mount the session base directory (contains worktrees)
@@ -640,15 +641,37 @@ remove_worktrees() {
 
     local worktree_base="$YOLO_DIR/$safe_name"
 
+    # Resolve project-local worktree base before removing symlinks
+    local project_wt_base=""
+    for repo_path in "${repos[@]}"; do
+        local repo_name
+        repo_name=$(basename "$repo_path")
+        local wt_path="$worktree_base/$repo_name"
+        if [ -L "$wt_path" ]; then
+            local target
+            target=$(readlink "$wt_path")
+            project_wt_base=$(dirname "$target")
+            break
+        fi
+    done
+
     for repo_path in "${repos[@]}"; do
         local repo_name
         repo_name=$(basename "$repo_path")
         local wt_path="$worktree_base/$repo_name"
 
-        if [ -d "$wt_path" ]; then
-            git -C "$repo_path" worktree remove --force "$wt_path" 2>/dev/null \
-                || { [[ "$(uname)" == "Darwin" ]] && chmod -R -N "$wt_path" 2>/dev/null; rm -rf "$wt_path"; }
+        # If symlink, resolve to real path for git worktree remove
+        local real_wt="$wt_path"
+        if [ -L "$wt_path" ]; then
+            real_wt=$(readlink "$wt_path")
         fi
+
+        if [ -d "$real_wt" ]; then
+            git -C "$repo_path" worktree remove --force "$real_wt" 2>/dev/null \
+                || { [[ "$(uname)" == "Darwin" ]] && chmod -R -N "$real_wt" 2>/dev/null; rm -rf "$real_wt"; }
+        fi
+        # Remove the symlink itself
+        [ -L "$wt_path" ] && rm -f "$wt_path"
 
         if [ "$delete_branches" = "true" ]; then
             git -C "$repo_path" branch -D "$session_name" 2>/dev/null || true
@@ -657,6 +680,17 @@ remove_worktrees() {
 
     [[ "$(uname)" == "Darwin" ]] && chmod -R -N "$worktree_base" 2>/dev/null
     rm -rf "$worktree_base"
+
+    # Clean up project-local worktree base directory
+    if [ -n "$project_wt_base" ] && [ -d "$project_wt_base" ]; then
+        rm -rf "$project_wt_base"
+        # Also clean up parent .yolo/worktrees/ if empty
+        local wt_parent
+        wt_parent=$(dirname "$project_wt_base")
+        rmdir "$wt_parent" 2>/dev/null || true
+        # And .yolo/ itself if empty
+        rmdir "$(dirname "$wt_parent")" 2>/dev/null || true
+    fi
 
     # Remove session entry from sessions.json
     local sessions_json="$YOLO_DIR/sessions.json"
@@ -1271,6 +1305,17 @@ if [ "$COMMAND" = "path" ]; then
         error "Session '$SESSION_NAME' is in bind mode (no worktrees)."
         exit 1
     fi
+    # Resolve to real path if worktrees are symlinked to project-local dir
+    for d in "$WT_BASE"/*/; do
+        [ -d "$d" ] || continue
+        d="${d%/}"
+        if [ -L "$d" ]; then
+            # Symlinked worktree — resolve to project-local parent
+            real_wt=$(readlink "$d")
+            echo "$(dirname "$real_wt")"
+            exit 0
+        fi
+    done
     echo "$WT_BASE"
     exit 0
 fi

@@ -107,6 +107,69 @@ else
     fail "Migration: git still works through symlink — got: $BRANCH"
 fi
 
+# 5. resolve_git_mounts returns real worktree path for Docker mounts
+eval "$(sed -n '/^resolve_git_common_dir()/,/^}/p' "$SCRIPT_DIR/yolo")"
+eval "$(sed -n '/^resolve_git_mounts()/,/^}/p' "$SCRIPT_DIR/yolo")"
+
+MOUNT_PROJECT="$TMPDIR/workspace/mountproject"
+MOUNT_REPO="$MOUNT_PROJECT/svc"
+setup_repo "$MOUNT_REPO"
+
+MOUNT_YOLO="$TMPDIR/yolo-home/mountproject"
+MOUNT_WT_BASE="$MOUNT_PROJECT/.yolo/worktrees/feat-m"
+mkdir -p "$MOUNT_YOLO/feat-m" "$MOUNT_WT_BASE"
+
+YOLO_REPOS="$MOUNT_REPO" YOLO_SESSION_BASE="$MOUNT_YOLO/feat-m" YOLO_WORKTREE_BASE="$MOUNT_WT_BASE" \
+    "$CREATE_SCRIPT" "feat-m" >/dev/null 2>&1
+ln -s "$MOUNT_WT_BASE/svc" "$MOUNT_YOLO/feat-m/svc"
+
+export YOLO_DIR="$MOUNT_YOLO" YOLO_WORKTREE_BASE="$MOUNT_WT_BASE"
+readarray -t mounts < <(resolve_git_mounts "$MOUNT_PROJECT" "feat-m" "$MOUNT_REPO")
+unset YOLO_WORKTREE_BASE
+
+FOUND_PROJECT_PATH=false
+for m in "${mounts[@]}"; do
+    if [[ "$m" == "$MOUNT_WT_BASE:"* ]]; then
+        FOUND_PROJECT_PATH=true
+    fi
+done
+if [ "$FOUND_PROJECT_PATH" = "true" ]; then
+    pass "resolve_git_mounts uses real worktree path"
+else
+    fail "resolve_git_mounts uses real worktree path — got: ${mounts[*]}"
+fi
+
+# 6. remove_worktrees cleans up both symlink and real worktree dir
+eval "$(sed -n '/^remove_worktrees()/,/^}/p' "$SCRIPT_DIR/yolo")"
+
+CLEAN_PROJECT="$TMPDIR/workspace/cleanproject"
+CLEAN_REPO="$CLEAN_PROJECT/lib"
+setup_repo "$CLEAN_REPO"
+
+CLEAN_YOLO="$TMPDIR/yolo-home/cleanproject"
+CLEAN_WT_BASE="$CLEAN_PROJECT/.yolo/worktrees/feat-c"
+mkdir -p "$CLEAN_YOLO/feat-c" "$CLEAN_WT_BASE"
+
+YOLO_REPOS="$CLEAN_REPO" YOLO_SESSION_BASE="$CLEAN_YOLO/feat-c" YOLO_WORKTREE_BASE="$CLEAN_WT_BASE" \
+    "$CREATE_SCRIPT" "feat-c" >/dev/null 2>&1
+ln -s "$CLEAN_WT_BASE/lib" "$CLEAN_YOLO/feat-c/lib"
+
+# Stub success output helper that remove_worktrees calls
+success() { :; }
+YOLO_DIR="$CLEAN_YOLO" remove_worktrees "feat-c" "feat-c" false "$CLEAN_REPO"
+
+if [ ! -d "$CLEAN_YOLO/feat-c" ]; then
+    pass "remove_worktrees: cleaned up ~/.yolo session dir"
+else
+    fail "remove_worktrees: cleaned up ~/.yolo session dir — still exists"
+fi
+
+if [ ! -d "$CLEAN_WT_BASE/lib" ]; then
+    pass "remove_worktrees: cleaned up project-local worktree dir"
+else
+    fail "remove_worktrees: cleaned up project-local worktree dir — still exists"
+fi
+
 echo ""
 if [ $FAILURES -eq 0 ]; then
     echo -e "${GREEN}${BOLD}All tests passed${RESET}"
