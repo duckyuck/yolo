@@ -26,13 +26,17 @@ if [ -z "${YOLO_SESSION_BASE:-}" ]; then
     exit 1
 fi
 
-mkdir -p "$YOLO_SESSION_BASE"
+# Determine where worktrees are created:
+# YOLO_WORKTREE_BASE (project-local) if set, else YOLO_SESSION_BASE (legacy ~/.yolo location)
+WORKTREE_DIR="${YOLO_WORKTREE_BASE:-$YOLO_SESSION_BASE}"
+
+mkdir -p "$WORKTREE_DIR"
 
 IFS='|' read -ra REPOS <<< "$YOLO_REPOS"
 
 for repo_path in "${REPOS[@]}"; do
     repo_name=$(basename "$repo_path")
-    wt_path="$YOLO_SESSION_BASE/$repo_name"
+    wt_path="$WORKTREE_DIR/$repo_name"
 
     # Idempotent: skip if worktree already exists
     if [ -d "$wt_path" ] && { [ -d "$wt_path/.git" ] || [ -f "$wt_path/.git" ]; }; then
@@ -68,7 +72,7 @@ done
 
 # Return path: single repo = worktree path, multi-repo = session base
 if [ ${#REPOS[@]} -eq 1 ]; then
-    echo "$YOLO_SESSION_BASE/$(basename "${REPOS[0]}")"
+    echo "$WORKTREE_DIR/$(basename "${REPOS[0]}")"
 else
-    echo "$YOLO_SESSION_BASE"
+    echo "$WORKTREE_DIR"
 fi

@@ -103,6 +103,39 @@ else
     fail "Multi-repo stdout is session base — got: $stdout"
 fi
 
+# 7. YOLO_WORKTREE_BASE → worktrees created at worktree base, not session base
+REPO_WB="$TMPDIR/repos/delta"
+setup_repo "$REPO_WB"
+
+WB_SESSION_BASE="$TMPDIR/sessions/s-wb"
+WB_WORKTREE_BASE="$TMPDIR/project/.yolo/worktrees/s-wb"
+
+stdout=$(YOLO_REPOS="$REPO_WB" YOLO_SESSION_BASE="$WB_SESSION_BASE" YOLO_WORKTREE_BASE="$WB_WORKTREE_BASE" \
+    "$SCRIPT" "wb-test" 2>/dev/null)
+if [ -d "$WB_WORKTREE_BASE/delta" ] && [ -f "$WB_WORKTREE_BASE/delta/.git" ]; then
+    pass "YOLO_WORKTREE_BASE: worktree created at worktree base"
+else
+    fail "YOLO_WORKTREE_BASE: worktree created at worktree base — dir missing"
+fi
+if [[ "$stdout" == "$WB_WORKTREE_BASE/delta" ]]; then
+    pass "YOLO_WORKTREE_BASE: stdout returns worktree base path"
+else
+    fail "YOLO_WORKTREE_BASE: stdout returns worktree base path — got: $stdout"
+fi
+
+# 8. Without YOLO_WORKTREE_BASE → backward compat, uses YOLO_SESSION_BASE
+REPO_COMPAT="$TMPDIR/repos/epsilon"
+setup_repo "$REPO_COMPAT"
+
+COMPAT_BASE="$TMPDIR/sessions/s-compat"
+stdout=$(YOLO_REPOS="$REPO_COMPAT" YOLO_SESSION_BASE="$COMPAT_BASE" \
+    "$SCRIPT" "compat-test" 2>/dev/null)
+if [ -d "$COMPAT_BASE/epsilon" ] && [ -f "$COMPAT_BASE/epsilon/.git" ]; then
+    pass "No YOLO_WORKTREE_BASE: falls back to YOLO_SESSION_BASE"
+else
+    fail "No YOLO_WORKTREE_BASE: falls back to YOLO_SESSION_BASE — dir missing"
+fi
+
 # ─── Summary ────────────────────────────────────────────────────────────────
 
 echo ""
