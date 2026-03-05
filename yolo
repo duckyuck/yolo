@@ -1545,7 +1545,24 @@ case "$COMMAND" in
         step "Setting up worktrees"
         export YOLO_REPOS=$(IFS='|'; echo "${REPOS[*]}")
         export YOLO_SESSION_BASE="$YOLO_DIR/$SAFE_NAME"
-        mkdir -p "$YOLO_SESSION_BASE"
+        export YOLO_WORKTREE_BASE="$PROJECT_DIR/.yolo/worktrees/$SAFE_NAME"
+        mkdir -p "$YOLO_SESSION_BASE" "$YOLO_WORKTREE_BASE"
+
+        # Migrate old worktrees: move real dirs to project-local, replace with symlinks
+        for repo_path in "${REPOS[@]}"; do
+            repo_name=$(basename "$repo_path")
+            old_wt="$YOLO_SESSION_BASE/$repo_name"
+            new_wt="$YOLO_WORKTREE_BASE/$repo_name"
+            if [ -d "$old_wt" ] && [ ! -L "$old_wt" ]; then
+                # Real worktree at old location — migrate it
+                if [ ! -d "$new_wt" ]; then
+                    mv "$old_wt" "$new_wt"
+                    ln -s "$new_wt" "$old_wt"
+                    info "Migrated worktree: $repo_name"
+                fi
+            fi
+        done
+
         WT_STDERR="$YOLO_TMPDIR/wt-stderr"
         WORKTREE_PATH=$("$YOLO_LIB/hooks/worktree-create.sh" "$SESSION_NAME" 2>"$WT_STDERR")
         while IFS= read -r line; do
@@ -1561,6 +1578,23 @@ case "$COMMAND" in
         done < "$WT_STDERR"
         export WORKDIR="$WORKTREE_PATH"
         update_sessions_json "$YOLO_DIR" "$SAFE_NAME" "$PROJECT_DIR" "${REPOS[@]}"
+
+        # Create symlinks from ~/.yolo → project-local worktrees
+        for repo_path in "${REPOS[@]}"; do
+            repo_name=$(basename "$repo_path")
+            old_wt="$YOLO_SESSION_BASE/$repo_name"
+            new_wt="$YOLO_WORKTREE_BASE/$repo_name"
+            if [ -d "$new_wt" ] && [ ! -e "$old_wt" ]; then
+                ln -s "$new_wt" "$old_wt"
+            fi
+        done
+
+        # Add .yolo/worktrees/ to .gitignore if project dir is a git repo
+        if [ -d "$PROJECT_DIR/.git" ]; then
+            if ! grep -qxF '.yolo/worktrees/' "$PROJECT_DIR/.gitignore" 2>/dev/null; then
+                echo '.yolo/worktrees/' >> "$PROJECT_DIR/.gitignore"
+            fi
+        fi
 
         readarray -t MOUNTS < <(resolve_git_mounts "$PROJECT_DIR" "$SAFE_NAME" "${REPOS[@]}")
     else
