@@ -466,6 +466,110 @@ else
     fail "Conversation data should be migrated — got:\n$(echo "$MIGRATE_OUTPUT" | tail -10)"
 fi
 
+# ─── Test: conversation data merged when both old and new key dirs exist ──────
+
+MERGE_OUTPUT=$(
+    docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$E2E_SRC:/opt/yolo-src:ro" \
+        -v "$E2E_YOLO_HOME:$E2E_YOLO_HOME" \
+        -e YOLO_HOST_HOME="$HOME" \
+        -e YOLO_HOME="$E2E_YOLO_HOME" \
+        -e ANTHROPIC_API_KEY="sk-test-fake" \
+        --entrypoint /bin/bash \
+        "$TEST_IMAGE" \
+        -c '
+            set -e
+
+            PROJ=$(mktemp -d)
+            cd "$PROJ"
+            PROJ_BASE=$(basename "$PROJ")
+
+            cp /opt/yolo-src/yolo .
+            cp /opt/yolo-src/docker-compose.yml .
+            cp /opt/yolo-src/Dockerfile .
+            cp /opt/yolo-src/entrypoint.sh .
+            cp /opt/yolo-src/tmux.conf .
+            cp /opt/yolo-src/shutdown.sh .
+            cp -r /opt/yolo-src/hooks .
+
+            # Pre-populate BOTH old and new key dirs (simulates the bug scenario)
+            OLD_KEY=$(echo "$HOME/.yolo/$PROJ_BASE/merge-test/$PROJ_BASE" | tr "/." "-")
+            NEW_KEY=$(echo "$PROJ" | tr "/." "-")
+            PROJECTS_DIR="'"$E2E_YOLO_HOME"'/$PROJ_BASE/merge-test/.claude-projects"
+            mkdir -p "$PROJECTS_DIR/$OLD_KEY" "$PROJECTS_DIR/$NEW_KEY"
+
+            # Old key has 3 conversations (the real data)
+            echo "old-convo-1" > "$PROJECTS_DIR/$OLD_KEY/aaa.jsonl"
+            echo "old-convo-2" > "$PROJECTS_DIR/$OLD_KEY/bbb.jsonl"
+            echo "old-convo-3" > "$PROJECTS_DIR/$OLD_KEY/ccc.jsonl"
+            mkdir -p "$PROJECTS_DIR/$OLD_KEY/memory"
+            echo "old-memory" > "$PROJECTS_DIR/$OLD_KEY/memory/MEMORY.md"
+
+            # New key has 1 conversation (created by Claude on brief startup)
+            echo "new-convo" > "$PROJECTS_DIR/$NEW_KEY/ddd.jsonl"
+            mkdir -p "$PROJECTS_DIR/$NEW_KEY/memory"
+            echo "new-memory" > "$PROJECTS_DIR/$NEW_KEY/memory/MEMORY.md"
+
+            mkdir -p /tmp/bin
+            cat > /tmp/bin/docker <<'"'"'WRAPPER'"'"'
+#!/bin/bash
+if [ "$1" = "compose" ]; then
+    for arg in "$@"; do
+        case "$arg" in
+            up)   exit 0 ;;
+            ps)   echo "fake-container-id"; exit 0 ;;
+        esac
+    done
+fi
+case "$1" in
+    exec)    exit 0 ;;
+    inspect) echo "running"; exit 0 ;;
+esac
+exec /usr/bin/docker "$@"
+WRAPPER
+            chmod +x /tmp/bin/docker
+            export PATH="/tmp/bin:$PATH"
+
+            output=$(bash ./yolo up merge-test 2>&1) || true
+            echo "$output"
+
+            # Check: old key should be gone, new key should have all data
+            if [ ! -d "$PROJECTS_DIR/$OLD_KEY" ] \
+                && [ -f "$PROJECTS_DIR/$NEW_KEY/aaa.jsonl" ] \
+                && [ -f "$PROJECTS_DIR/$NEW_KEY/bbb.jsonl" ] \
+                && [ -f "$PROJECTS_DIR/$NEW_KEY/ccc.jsonl" ] \
+                && [ -f "$PROJECTS_DIR/$NEW_KEY/ddd.jsonl" ]; then
+                echo "MERGE_DATA_OK"
+            else
+                echo "MERGE_DATA_FAILED"
+                echo "Old dir exists: $([ -d "$PROJECTS_DIR/$OLD_KEY" ] && echo YES || echo NO)"
+                echo "Expected key: $NEW_KEY"
+                ls -laR "$PROJECTS_DIR/" 2>&1 || true
+            fi
+
+            # New key memory should be preserved (no-clobber)
+            if [ -f "$PROJECTS_DIR/$NEW_KEY/memory/MEMORY.md" ] \
+                && grep -q "new-memory" "$PROJECTS_DIR/$NEW_KEY/memory/MEMORY.md"; then
+                echo "MERGE_NOCLOBBER_OK"
+            else
+                echo "MERGE_NOCLOBBER_FAILED"
+            fi
+        '
+) 2>&1
+
+if [[ "$MERGE_OUTPUT" == *"MERGE_DATA_OK"* ]]; then
+    pass "Both-dirs migration merges old conversations into new key"
+else
+    fail "Both-dirs migration should merge data — got:\n$(echo "$MERGE_OUTPUT" | tail -15)"
+fi
+
+if [[ "$MERGE_OUTPUT" == *"MERGE_NOCLOBBER_OK"* ]]; then
+    pass "Both-dirs migration preserves existing data in new key (no-clobber)"
+else
+    fail "Both-dirs migration should not overwrite new key data — got:\n$(echo "$MERGE_OUTPUT" | tail -10)"
+fi
+
 # ─── Test: Shift-Q shutdown triggers container removal and session cleanup ────
 
 SHUTDOWN_OUTPUT=$(

@@ -416,6 +416,61 @@ ensure_git_repos() {
     fi
 }
 
+# ─── Conversation Data Migration ─────────────────────────────────────────────
+
+# Migrate Claude Code conversation data when WORKDIR changes.
+# Claude Code keys conversations by CWD (encoding: tr '/.' '-'), so a path
+# change makes old conversations invisible. This function consolidates all
+# old project key directories into the expected one.
+#
+# Usage: migrate_project_key <projects_dir> <expected_workdir>
+migrate_project_key() {
+    local projects_dir="$1"
+    local workdir="$2"
+    local expected_key
+    expected_key=$(echo "$workdir" | tr '/.' '-')
+
+    [ -d "$projects_dir" ] || return 0
+
+    # Find all project key dirs that don't match the expected key
+    local old_dirs=()
+    for d in "$projects_dir"/*/; do
+        [ -d "$d" ] || continue
+        local dname
+        dname=$(basename "$d")
+        [ "$dname" != "$expected_key" ] && old_dirs+=("$dname")
+    done
+
+    [ ${#old_dirs[@]} -eq 0 ] && return 0
+
+    local dest="$projects_dir/$expected_key"
+    mkdir -p "$dest"
+
+    for old_key in "${old_dirs[@]}"; do
+        local src="$projects_dir/$old_key"
+        # Move everything from old → new (no-clobber: don't overwrite newer data)
+        for f in "$src"/*; do
+            [ -e "$f" ] || continue
+            local fname
+            fname=$(basename "$f")
+            if [ ! -e "$dest/$fname" ]; then
+                mv "$f" "$dest/$fname"
+            elif [ -d "$f" ] && [ -d "$dest/$fname" ]; then
+                # Merge subdirectory contents (e.g. memory/)
+                for sf in "$f"/*; do
+                    [ -e "$sf" ] || continue
+                    local sfname
+                    sfname=$(basename "$sf")
+                    [ ! -e "$dest/$fname/$sfname" ] && mv "$sf" "$dest/$fname/$sfname"
+                done
+            fi
+        done
+        rm -rf "$src"
+    done
+
+    info "Migrated conversation data to new working directory"
+}
+
 # ─── Worktree Management ──────────────────────────────────────────────────────
 
 resolve_git_common_dir() {
@@ -972,15 +1027,7 @@ attach_to_claude() {
     fi
     # Migrate conversation data if project key doesn't match the new CWD
     if [ -n "${CLAUDE_PROJECTS_DIR:-}" ]; then
-        local expected_key
-        expected_key=$(echo "$session_workdir" | tr '/.' '-')
-        if [ ! -d "$CLAUDE_PROJECTS_DIR/$expected_key" ]; then
-            local old_key
-            old_key=$(find "$CLAUDE_PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | xargs -I{} basename {} 2>/dev/null) || true
-            if [ -n "$old_key" ] && [ "$old_key" != "$expected_key" ]; then
-                mv "$CLAUDE_PROJECTS_DIR/$old_key" "$CLAUDE_PROJECTS_DIR/$expected_key"
-            fi
-        fi
+        migrate_project_key "$CLAUDE_PROJECTS_DIR" "$session_workdir"
     fi
 
     docker exec "$container" tmux new-session -d -s "$session" -n claude -c "$session_workdir"
@@ -1829,17 +1876,10 @@ case "$COMMAND" in
         export CLAUDE_CONTINUE=true
     fi
 
-    # Migrate conversation data when WORKDIR changes (e.g. worktree→bind mode switch).
-    # Claude Code keys conversations by CWD (encoding: tr '/.' '-'), so a mode change
-    # makes old conversations invisible. Rename the old key directory to match new WORKDIR.
-    EXPECTED_PROJECT_KEY=$(echo "$WORKDIR" | tr '/.' '-')
-    if [ ! -d "$CLAUDE_PROJECTS_DIR/$EXPECTED_PROJECT_KEY" ]; then
-        OLD_KEY=$(find "$CLAUDE_PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null | xargs -I{} basename {} 2>/dev/null) || true
-        if [ -n "$OLD_KEY" ] && [ "$OLD_KEY" != "$EXPECTED_PROJECT_KEY" ]; then
-            mv "$CLAUDE_PROJECTS_DIR/$OLD_KEY" "$CLAUDE_PROJECTS_DIR/$EXPECTED_PROJECT_KEY"
-            info "Migrated conversation data to new working directory"
-        fi
-    fi
+    # Migrate conversation data when WORKDIR changes (e.g. worktree relocation, mode switch).
+    # Claude Code keys conversations by CWD (encoding: tr '/.' '-'), so a path change
+    # makes old conversations invisible. Consolidate all old key dirs into the expected one.
+    migrate_project_key "$CLAUDE_PROJECTS_DIR" "$WORKDIR"
 
     # Ensure bind-mounted files exist (Docker creates directories if files are missing)
     mkdir -p "$YOLO_HOST_HOME/.claude" 2>/dev/null || true
